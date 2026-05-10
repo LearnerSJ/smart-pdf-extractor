@@ -2,6 +2,8 @@
 
 A back-office document extraction service for financial reconciliation. Processes bank statements, custody statements, SWIFT confirmations, and settlement reports — extracting structured data from any PDF format (digital or scanned).
 
+![Smart PDF Screenshot](docs/screenshot.png)
+
 ## Features
 
 - **Schema-agnostic extraction** — handles any table structure without hardcoded column definitions
