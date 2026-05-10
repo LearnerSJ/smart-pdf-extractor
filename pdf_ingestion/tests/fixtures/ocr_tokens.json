@@ -1,0 +1,41 @@
+{
+  "bank_statement_page1": {
+    "results": [
+      {"text": "Bank", "bbox": [50.0, 100.0, 100.0, 120.0], "confidence": 0.97},
+      {"text": "Statement", "bbox": [105.0, 100.0, 200.0, 120.0], "confidence": 0.96},
+      {"text": "Account:", "bbox": [50.0, 140.0, 120.0, 160.0], "confidence": 0.98},
+      {"text": "1234567890", "bbox": [125.0, 140.0, 250.0, 160.0], "confidence": 0.95},
+      {"text": "Date:", "bbox": [50.0, 180.0, 90.0, 200.0], "confidence": 0.99},
+      {"text": "2024-01-15", "bbox": [95.0, 180.0, 200.0, 200.0], "confidence": 0.94},
+      {"text": "Opening", "bbox": [50.0, 220.0, 120.0, 240.0], "confidence": 0.96},
+      {"text": "Balance:", "bbox": [125.0, 220.0, 200.0, 240.0], "confidence": 0.97},
+      {"text": "10,000.00", "bbox": [205.0, 220.0, 300.0, 240.0], "confidence": 0.93},
+      {"text": "Closing", "bbox": [50.0, 260.0, 110.0, 280.0], "confidence": 0.96},
+      {"text": "Balance:", "bbox": [115.0, 260.0, 200.0, 280.0], "confidence": 0.97},
+      {"text": "12,500.00", "bbox": [205.0, 260.0, 300.0, 280.0], "confidence": 0.92}
+    ]
+  },
+  "custody_statement_page1": {
+    "results": [
+      {"text": "Custody", "bbox": [50.0, 100.0, 120.0, 120.0], "confidence": 0.97},
+      {"text": "Statement", "bbox": [125.0, 100.0, 220.0, 120.0], "confidence": 0.96},
+      {"text": "ISIN:", "bbox": [50.0, 140.0, 90.0, 160.0], "confidence": 0.98},
+      {"text": "US0378331005", "bbox": [95.0, 140.0, 230.0, 160.0], "confidence": 0.94},
+      {"text": "Holdings:", "bbox": [50.0, 180.0, 130.0, 200.0], "confidence": 0.95},
+      {"text": "1,000", "bbox": [135.0, 180.0, 200.0, 200.0], "confidence": 0.93},
+      {"text": "Market", "bbox": [50.0, 220.0, 110.0, 240.0], "confidence": 0.96},
+      {"text": "Value:", "bbox": [115.0, 220.0, 170.0, 240.0], "confidence": 0.97},
+      {"text": "150,000.00", "bbox": [175.0, 220.0, 280.0, 240.0], "confidence": 0.91}
+    ]
+  },
+  "swift_confirm_page1": {
+    "results": [
+      {"text": "{1:F01DEUTDEFFAXXX0000000000}", "bbox": [50.0, 100.0, 350.0, 120.0], "confidence": 0.96},
+      {"text": "{4:", "bbox": [50.0, 140.0, 80.0, 160.0], "confidence": 0.98},
+      {"text": ":20:TRADE-REF-001", "bbox": [50.0, 160.0, 250.0, 180.0], "confidence": 0.95},
+      {"text": ":98A::TRAD//20240115", "bbox": [50.0, 200.0, 280.0, 220.0], "confidence": 0.94},
+      {"text": ":35B:ISIN US0378331005", "bbox": [50.0, 240.0, 300.0, 260.0], "confidence": 0.93},
+      {"text": ":36B::SETT//UNIT/1000,", "bbox": [50.0, 280.0, 300.0, 300.0], "confidence": 0.92}
+    ]
+  }
+}

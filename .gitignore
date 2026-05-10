@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+
+# Environment
+.env
+pdf_ingestion/.env
+
+# OS
+.DS_Store
+
+# PDFs - all PDF files and the PDF folder
+*.pdf
+PDF/
+
+# IDE
+.vscode/
+
+# Test script output
+test_all_pdfs.py

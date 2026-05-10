@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pdf_ingestion
+      - PADDLEOCR_ENDPOINT=http://paddleocr:8080
+      - AWS_REGION=${AWS_REGION:-eu-west-1}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-anthropic.claude-3-5-sonnet-20241022-v2:0}
+      - VLM_CONFIDENCE_THRESHOLD=${VLM_CONFIDENCE_THRESHOLD:-0.80}
+      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paddleocr:
+        condition: service_started
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/v1/healthz'); assert r.status_code == 200"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=pdf_ingestion
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  paddleocr:
+    image: paddlepaddle/paddle:2.6.1
+    ports:
+      - "8080:8080"
+    environment:
+      - PADDLE_OCR_MODEL_DIR=/models
+    volumes:
+      - ocr_models:/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pgdata:
+  ocr_models:

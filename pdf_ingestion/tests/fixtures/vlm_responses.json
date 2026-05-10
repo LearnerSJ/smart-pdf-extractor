@@ -1,0 +1,26 @@
+{
+  "bank_statement_field": {
+    "value": "1234567890",
+    "confidence": 0.92,
+    "raw_response": "{\"content\":[{\"type\":\"text\",\"text\":\"1234567890\"}]}",
+    "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0"
+  },
+  "custody_isin_field": {
+    "value": "US0378331005",
+    "confidence": 0.88,
+    "raw_response": "{\"content\":[{\"type\":\"text\",\"text\":\"US0378331005\"}]}",
+    "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0"
+  },
+  "null_response": {
+    "value": null,
+    "confidence": 0.0,
+    "raw_response": "{\"content\":[{\"type\":\"text\",\"text\":\"NULL\"}]}",
+    "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0"
+  },
+  "swift_bic_field": {
+    "value": "DEUTDEFF",
+    "confidence": 0.95,
+    "raw_response": "{\"content\":[{\"type\":\"text\",\"text\":\"DEUTDEFF\"}]}",
+    "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "success_200": {
+    "status_code": 200,
+    "body": {"received": true, "message": "Payload accepted"}
+  },
+  "success_202": {
+    "status_code": 202,
+    "body": {"received": true, "message": "Payload queued for processing"}
+  },
+  "error_500": {
+    "status_code": 500,
+    "body": {"error": "Internal server error"}
+  },
+  "error_503": {
+    "status_code": 503,
+    "body": {"error": "Service unavailable"}
+  },
+  "error_timeout": {
+    "status_code": null,
+    "error": "Connection timed out after 30s"
+  },
+  "batch_delivery_payload": {
+    "type": "batch",
+    "batch_id": "batch-001",
+    "tenant_id": "tenant-001",
+    "completed_at": "2024-01-15T10:30:00Z",
+    "jobs_total": 3,
+    "jobs_complete": 2,
+    "jobs_failed": 1,
+    "results": [
+      {"job_id": "job-001", "status": "complete", "result": {}},
+      {"job_id": "job-002", "status": "complete", "result": {}},
+      {"job_id": "job-003", "status": "failed", "error": {"code": "ERR_EXTRACT_002", "message": "Unknown schema"}}
+    ]
+  },
+  "standalone_delivery_payload": {
+    "type": "standalone",
+    "job_id": "job-001",
+    "trace_id": "trace-abc-123",
+    "status": "complete",
+    "result": {
+      "doc_id": "sha256:abc123",
+      "schema_type": "bank_statement",
+      "status": "complete"
+    }
+  }
+}
