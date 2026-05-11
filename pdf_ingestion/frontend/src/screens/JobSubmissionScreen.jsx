@@ -82,6 +82,13 @@ export default function JobSubmissionScreen() {
       if (schemaType) formData.append("schema_type", schemaType);
 
       const data = await apiPost("/v1/extract", formData, true);
+
+      // Handle duplicate response
+      if (data.status === "duplicate") {
+        navigate(`/results/${data.job_id}`);
+        return;
+      }
+
       // Store job in session for the queue to pick up
       const stored = JSON.parse(sessionStorage.getItem("pdf_jobs") || "[]");
       stored.unshift(data.job_id);
@@ -102,6 +109,19 @@ export default function JobSubmissionScreen() {
     <div style={styles.page}>
       <h1 style={styles.title}>Submit Extraction Job</h1>
       <p style={styles.subtitle}>Upload a PDF document to extract structured financial data.</p>
+
+      {/* Upload progress banner */}
+      {uploading && (
+        <div style={styles.uploadBanner}>
+          <div style={styles.uploadSpinner}>⟳</div>
+          <div>
+            <div style={styles.uploadBannerTitle}>Uploading {file?.name}...</div>
+            <div style={styles.uploadBannerDetail}>
+              {(file?.size / (1024 * 1024)).toFixed(1)} MB — Please wait while the file is sent to the server
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Drop zone */}
       <div
@@ -357,5 +377,33 @@ const styles = {
     fontSize: "var(--text-xs)",
     color: "var(--color-error)",
     marginLeft: "auto",
+  },
+  uploadBanner: {
+    display: "flex",
+    alignItems: "center",
+    gap: "var(--space-3)",
+    width: "100%",
+    maxWidth: 600,
+    padding: "var(--space-4)",
+    backgroundColor: "rgba(52, 152, 219, 0.08)",
+    border: "1px solid var(--color-info)",
+    borderRadius: "var(--border-radius)",
+    marginBottom: "var(--space-5)",
+    animation: "pulse 2s ease-in-out infinite",
+  },
+  uploadSpinner: {
+    fontSize: "24px",
+    animation: "spin 1s linear infinite",
+    color: "var(--color-info)",
+  },
+  uploadBannerTitle: {
+    fontSize: "var(--text-md)",
+    fontWeight: 600,
+    color: "var(--color-text-primary)",
+  },
+  uploadBannerDetail: {
+    fontSize: "var(--text-sm)",
+    color: "var(--color-text-secondary)",
+    marginTop: "2px",
   },
 };

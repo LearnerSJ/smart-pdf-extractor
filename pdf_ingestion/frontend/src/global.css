@@ -109,3 +109,15 @@ input:focus, select:focus {
   background: var(--color-slate-light);
   border-radius: 3px;
 }
+
+
+/* Upload spinner animation */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.85; }
+}
