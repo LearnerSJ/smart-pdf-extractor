@@ -417,6 +417,244 @@ This plan implements a production-ready PDF extraction service for the reconcili
 - [ ] 10. Checkpoint - Ensure all chunked extraction tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
+- [ ] 11. Auto-schema discovery data models and error codes (Week 6)
+  - [ ] 11.1 Add discovery data models to pipeline/models.py
+    - Add `SchemaFingerprint` dataclass with `institution`, `document_type_label`, `key` property, and `from_key()` classmethod
+    - Add `DiscoveredFieldDefinition` dataclass with `field_name`, `description`, `location_hint`
+    - Add `DiscoveredTableDefinition` dataclass with `table_type`, `expected_headers`, `data_pattern`, `location_hint`
+    - Add `DiscoveredSchema` dataclass with `document_type_label`, `institution`, `metadata_fields`, `table_definitions`, and auto-computed `fingerprint`
+    - Add `DiscoverySample` dataclass with `page_texts`, `page_numbers`, `estimated_tokens`, `page_count` property, and `combined_text` property
+    - _Requirements: 25.1, 26.1, 26.2, 26.3, 28.1_
+
+  - [ ] 11.2 Add discovery error codes to api/errors.py
+    - Add `DISCOVERY_SCHEMA_ANALYSIS_FAILED = "ERR_DISCOVERY_001"` to `ErrorCode`
+    - Add `DISCOVERY_DYNAMIC_EXTRACTION_FAILED = "ERR_DISCOVERY_002"` to `ErrorCode`
+    - Add `DISCOVERY_CACHE_LOOKUP_FAILED = "ERR_DISCOVERY_003"` to `ErrorCode`
+    - _Requirements: 30.1_
+
+  - [ ] 11.3 Add discovery configuration to api/config.py
+    - Add `discovery_sample_pages: int = 5` to `Settings`
+    - Add `discovery_max_context_ratio: float = 0.80` to `Settings`
+    - Add `discovery_cache_enabled: bool = True` to `Settings`
+    - _Requirements: 26.1, 26.6, 28.2_
+
+- [ ] 12. Schema cache database and component (Week 6)
+  - [ ] 12.1 Create schema cache database migration
+    - Create `db/migrations/versions/20250XXX_auto_schema_cache.py` with `discovered_schemas` table
+    - Table columns: `id` (UUID PK), `tenant_id` (UUID FK), `fingerprint_key` (VARCHAR 512), `institution` (VARCHAR 256), `document_type_label` (VARCHAR 256), `schema_json` (JSONB), `created_at` (TIMESTAMPTZ), `updated_at` (TIMESTAMPTZ), `usage_count` (INTEGER DEFAULT 1)
+    - Add UNIQUE constraint on `(tenant_id, fingerprint_key)`
+    - Add indexes: `idx_discovered_schemas_tenant`, `idx_discovered_schemas_fingerprint`
+    - _Requirements: 28.1, 28.3, 28.6_
+
+  - [ ] 12.2 Implement SchemaCache component
+    - Create `pipeline/discovery/schema_cache.py` with `SchemaCache` class
+    - Implement `lookup(fingerprint, tenant_id)` — returns `DiscoveredSchema | None`, increments `usage_count` on hit
+    - Implement `store(schema, fingerprint, tenant_id)` — upserts schema, sets `created_at` and `usage_count`
+    - Implement `invalidate(fingerprint, tenant_id)` — deletes entry, returns `True` if existed
+    - Implement `list_for_tenant(tenant_id)` — returns all cached schemas for admin/debug
+    - Ensure all queries include `tenant_id` filter for tenant isolation
+    - _Requirements: 28.1, 28.2, 28.3, 28.4, 28.6_
+
+- [ ] 13. AutoSchemaDiscovery component implementation (Week 6)
+  - [ ] 13.1 Implement sample selection and VLM prompt construction
+    - Create `pipeline/discovery/auto_discovery.py` with `AutoSchemaDiscovery` class
+    - Implement `_select_sample(doc, max_pages)` — selects first N pages (default 5), adaptively reduces if token estimate exceeds 80% of context window
+    - Implement `_build_analysis_prompt(sample_text)` — constructs the `SCHEMA_ANALYSIS_PROMPT` with page content
+    - Use `vlm_client.estimate_tokens()` for token estimation and `vlm_client.max_context_tokens()` for budget check
+    - _Requirements: 26.1, 26.2, 26.6_
+
+  - [ ] 13.2 Implement VLM response parsing
+    - Implement `_parse_schema_response(raw_response)` — parses JSON into `DiscoveredSchema`
+    - Return `None` for null, empty, or malformed JSON responses
+    - Validate that parsed schema has non-empty `document_type_label`, `institution`, and at least one field or table definition
+    - _Requirements: 26.3, 26.4_
+
+  - [ ] 13.3 Implement main discovery flow
+    - Implement `discover(doc, tenant, token_budget, trace_id)` method
+    - Step 1: Check circuit breaker — abstain with ERR_VLM_005 if open
+    - Step 2: Check schema cache for existing match (by partial fingerprint from doc signals)
+    - Step 3: If cache miss — select sample, redact via `RedactorPort`, send to VLM
+    - Step 4: Parse response — abstain with ERR_DISCOVERY_001 if unparseable
+    - Step 5: Store in cache, return `DiscoveredSchema`
+    - Record all VLM token usage in `TokenBudget`
+    - Emit `discovery.triggered`, `discovery.cache_hit`/`discovery.cache_miss`, `discovery.schema_analysed` log events
+    - _Requirements: 25.1, 25.3, 25.4, 25.5, 26.1, 26.4, 26.5, 28.2, 28.5, 30.2, 30.3_
+
+- [ ] 14. DynamicExtractor component implementation (Week 6)
+  - [ ] 14.1 Implement DynamicExtractor class
+    - Create `pipeline/discovery/dynamic_extractor.py` with `DynamicExtractor` class
+    - Implement `extract(doc, schema, tenant, token_budget, trace_id)` method
+    - Use DiscoveredSchema field definitions to build extraction prompts
+    - Use DiscoveredSchema table definitions (expected headers) to guide table extraction
+    - Apply same chunked extraction strategy (Tier 1/2/3) as standard VLM_Fallback based on document size
+    - Apply Presidio redaction before each VLM call using tenant config
+    - Verify each extracted value against token stream via Verifier (threshold 0.85)
+    - _Requirements: 27.1, 27.2, 27.3, 27.4, 27.5, 27.6_
+
+  - [ ] 14.2 Implement output format compliance
+    - Set `provenance.source = "vlm"` on all extracted fields
+    - Set `provenance.extraction_rule = "discovered:{field_name}"` on all fields
+    - Set `schema_type = "discovered:{document_type_label}"` on the extraction result
+    - Include confidence score derived from VLM confidence and Verifier match score
+    - Produce Abstention with ERR_EXTRACT_001 for fields that cannot be extracted
+    - Emit `discovery.extraction_complete` log event with counts
+    - _Requirements: 27.7, 29.1, 29.2, 29.3, 29.4, 30.4_
+
+- [ ] 15. Schema router modification (Week 6)
+  - [ ] 15.1 Integrate auto-discovery into route_and_extract
+    - Modify `pipeline/schemas/router.py` `route_and_extract()` function
+    - When `detect_schema()` returns "unknown" and `tenant.vlm_enabled` is True: delegate to `AutoSchemaDiscovery`
+    - If discovery returns `DiscoveredSchema`: create `DynamicExtractor` and extract
+    - If discovery returns `Abstention`: return the abstention result
+    - When `vlm_enabled` is False: retain existing ERR_EXTRACT_002 abstention behaviour
+    - Pass `schema_cache`, `token_budget`, and `trace_id` through to discovery
+    - _Requirements: 25.1, 25.2_
+
+- [ ] 16. Checkpoint - Ensure discovery core components work
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [ ] 17. API endpoints and validator modification (Week 7)
+  - [ ] 17.1 Implement schema cache API endpoints
+    - Create `api/routes/schema_cache.py` with router
+    - Implement `DELETE /v1/tenants/{tenant_id}/schema-cache/{fingerprint}` — invalidates a cached schema
+    - Implement `GET /v1/tenants/{tenant_id}/schema-cache` — lists all cached schemas for the tenant
+    - Enforce `resolve_tenant` dependency and tenant_id match check
+    - Return `APIResponse` envelope on all responses
+    - Return 404 if fingerprint not found on DELETE
+    - Register router in `api/main.py`
+    - _Requirements: 28.4, 28.6_
+
+  - [ ] 17.2 Modify Validator for discovered schemas
+    - Add `select_validators(schema_type)` function to `pipeline/validators.py`
+    - When `schema_type.startswith("discovered:")`: return only generic validators (date_range, currency_code, provenance_integrity)
+    - When schema_type is a known static type: return full validator suite including IBAN, ISIN, BIC, arithmetic_balance
+    - Update `run_validators()` to use `select_validators()` for validator selection
+    - _Requirements: 29.6_
+
+  - [ ] 17.3 Modify Packager for discovered schemas
+    - Update `pipeline/packager.py` to handle `schema_type` values prefixed with `"discovered:"`
+    - Include the `DiscoveredSchema` definition in the output metadata when schema_type is discovered
+    - _Requirements: 29.5_
+
+- [ ] 18. Structured log events for discovery (Week 7)
+  - [ ] 18.1 Implement discovery log events
+    - Emit `discovery.triggered` with job_id, tenant_id, filename when auto-discovery starts
+    - Emit `discovery.cache_hit` with job_id, tenant_id, fingerprint, usage_count when cached schema reused
+    - Emit `discovery.cache_miss` with job_id, tenant_id when no cached schema found
+    - Emit `discovery.schema_analysed` with job_id, document_type_label, institution, fields_count, tables_count
+    - Emit `discovery.extraction_complete` with job_id, tenant_id, schema_type, fields_extracted, fields_abstained, tables_extracted
+    - Emit `discovery.failed` with job_id, tenant_id, error_code, detail on any failure
+    - Emit `discovery.sample_reduced` with job_id, original_pages, reduced_pages, estimated_tokens when sample is adaptively reduced
+    - Set `schema_type = "discovery"` in usage events for cost attribution
+    - _Requirements: 25.3, 28.5, 30.2, 30.3, 30.4, 30.6_
+
+- [ ] 19. Unit tests for auto-schema discovery (Week 7)
+  - [ ] 19.1 Write unit tests for data models and schema cache
+    - Test `SchemaFingerprint.key` property normalisation (lowercase, stripped, spaces→underscores)
+    - Test `SchemaFingerprint.from_key()` round-trip parsing
+    - Test `DiscoveredSchema.__post_init__` auto-computes fingerprint
+    - Test `DiscoverySample.combined_text` concatenation with page markers
+    - Test `SchemaCache.lookup()` returns None on miss, schema on hit, increments usage_count
+    - Test `SchemaCache.store()` upserts correctly
+    - Test `SchemaCache.invalidate()` returns True/False appropriately
+    - _Requirements: 28.1, 28.2, 28.3_
+
+  - [ ] 19.2 Write unit tests for AutoSchemaDiscovery
+    - Test sample selection with documents of varying page counts (1, 5, 50, 500 pages)
+    - Test adaptive sample reduction when token estimate exceeds 80% of context window
+    - Test VLM prompt construction includes correct page markers and schema structure
+    - Test response parsing with valid JSON → produces DiscoveredSchema
+    - Test response parsing with null/empty/malformed JSON → returns None
+    - Test circuit breaker open → immediate abstention with ERR_VLM_005
+    - Test cache hit path → no VLM call made, cached schema returned
+    - Test token budget exhausted → abstention with ERR_VLM_007
+    - _Requirements: 25.1, 25.4, 25.5, 26.1, 26.3, 26.4, 26.6_
+
+  - [ ] 19.3 Write unit tests for DynamicExtractor
+    - Test field extraction prompt uses discovered field definitions
+    - Test table extraction prompt uses discovered expected headers
+    - Test output format: provenance.source="vlm", extraction_rule="discovered:{name}", schema_type prefix
+    - Test verification failure → field appears in abstentions with ERR_VLM_004
+    - Test all fields abstained → correct ERR_EXTRACT_001 abstentions produced
+    - _Requirements: 27.1, 27.2, 27.3, 27.6, 27.7, 29.1, 29.2, 29.3_
+
+  - [ ] 19.4 Write unit tests for schema router and validator
+    - Test routing: schema_type="unknown" + vlm_enabled=True → discovery triggered
+    - Test routing: schema_type="unknown" + vlm_enabled=False → ERR_EXTRACT_002 abstention
+    - Test routing: known schema_type → static extractor used (unchanged behaviour)
+    - Test `select_validators("discovered:futures_trade_confirmation")` → only generic validators
+    - Test `select_validators("bank_statement")` → full validator suite
+    - _Requirements: 25.1, 25.2, 29.6_
+
+- [ ] 20. Property tests for auto-schema discovery (Week 7)
+  - [ ]* 20.1 Write property test for discovery routing decision
+    - **Property 1: Discovery routing decision is determined by vlm_enabled**
+    - Generate random `(schema_type, vlm_enabled)` pairs; assert routing matches spec
+    - **Validates: Requirements 25.1, 25.2**
+
+  - [ ]* 20.2 Write property test for token budget accounting
+    - **Property 2: Token budget accounting includes discovery calls**
+    - Generate random sequences of (input_tokens, output_tokens); assert total_consumed == sum(all pairs)
+    - **Validates: Requirements 25.4**
+
+  - [ ]* 20.3 Write property test for discovery sample context window
+    - **Property 3: Discovery sample respects context window**
+    - Generate random page texts of varying lengths; assert sample token estimate ≤ 80% of max_context_tokens
+    - **Validates: Requirements 26.1, 26.6**
+
+  - [ ]* 20.4 Write property test for valid VLM response parsing
+    - **Property 4: Valid VLM response produces complete DiscoveredSchema**
+    - Generate random valid JSON via `st.fixed_dictionaries`; assert parsed schema has non-empty label, institution, and ≥1 field or table
+    - **Validates: Requirements 26.3**
+
+  - [ ]* 20.5 Write property test for invalid VLM response handling
+    - **Property 5: Invalid VLM response produces correct abstention**
+    - Generate null, empty, malformed JSON; assert Abstention with ERR_DISCOVERY_001
+    - **Validates: Requirements 26.4**
+
+  - [ ]* 20.6 Write property test for schema cache round-trip
+    - **Property 6: Schema cache round-trip**
+    - Generate random DiscoveredSchema, store, lookup by same fingerprint+tenant; assert equivalence
+    - **Validates: Requirements 28.1, 28.2**
+
+  - [ ]* 20.7 Write property test for schema cache tenant isolation
+    - **Property 7: Schema cache tenant isolation**
+    - Generate random tenant pairs and schemas; store under tenant A, lookup under tenant B; assert miss
+    - **Validates: Requirements 28.6**
+
+  - [ ]* 20.8 Write property test for dynamic extraction output format
+    - **Property 8: Dynamic extraction output format compliance**
+    - Generate random DiscoveredSchema + mock VLM responses; assert provenance.source="vlm", extraction_rule starts with "discovered:", confidence in [0,1], schema_type prefix correct
+    - **Validates: Requirements 29.1, 29.2, 29.3, 29.4**
+
+  - [ ]* 20.9 Write property test for validator selection
+    - **Property 9: Validator selection for discovered schemas**
+    - Generate random schema_type strings with/without "discovered:" prefix; assert correct validator set
+    - **Validates: Requirements 29.6**
+
+  - [ ]* 20.10 Write property test for discovery failure error codes
+    - **Property 10: Discovery failure produces correct error codes**
+    - Generate random failure scenarios; assert Abstention references ERR_DISCOVERY_001/002/003 only
+    - **Validates: Requirements 30.5**
+
+  - [ ]* 20.11 Write property test for dynamic extractor verification
+    - **Property 11: Dynamic extractor verifies all values**
+    - Generate random field values and token streams; assert verified values in fields, unverified in abstentions with ERR_VLM_004
+    - **Validates: Requirements 27.6**
+
+- [ ] 21. Integration test for end-to-end discovery flow (Week 7)
+  - [ ]* 21.1 Write integration test for auto-schema discovery end-to-end
+    - Submit a document with unknown schema_type and vlm_enabled=True
+    - Mock VLM to return valid schema analysis JSON
+    - Assert: discovery triggered → schema cached → dynamic extraction runs → output has "discovered:" prefix
+    - Assert: second submission of same type → cache hit → no VLM discovery call
+    - Assert: DELETE schema-cache endpoint → cache invalidated → next submission triggers fresh discovery
+    - Assert: all structured log events emitted (discovery.triggered, discovery.schema_analysed, discovery.extraction_complete)
+    - _Requirements: 25.1, 26.3, 27.1, 28.1, 28.2, 28.4, 28.5, 29.3, 30.2_
+
+- [ ] 22. Final checkpoint - Ensure all auto-schema discovery tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
 ## Notes
 
 - Tasks marked with `*` are optional and can be skipped for faster MVP
@@ -429,3 +667,11 @@ This plan implements a production-ready PDF extraction service for the reconcili
 - Week 5 tasks (chunked extraction) build on the existing VLM fallback infrastructure from Week 3
 - The `estimate_tokens()` and `max_context_tokens()` methods are added to the existing `VLMClientPort` ABC — all existing implementations and mocks must be updated
 - New error codes (ERR_VLM_007, ERR_VLM_008, ERR_VLM_009) follow the existing namespaced pattern in `api/errors.py`
+- Week 6–7 tasks (auto-schema discovery) build on the chunked extraction infrastructure from Week 5 and the VLM fallback from Week 3
+- Auto-schema discovery introduces a new `pipeline/discovery/` directory containing `auto_discovery.py`, `dynamic_extractor.py`, and `schema_cache.py`
+- Discovery error codes (ERR_DISCOVERY_001/002/003) follow the existing namespaced pattern and are added to the central `ErrorCode` registry in `api/errors.py`
+- The `SchemaCache` is backed by PostgreSQL (same DB as jobs/results) with a dedicated `discovered_schemas` table
+- Discovery VLM calls count toward the same per-job `TokenBudget` as standard extraction calls — no separate budget
+- The `DynamicExtractor` reuses the same chunked extraction tiers (1/2/3) and `Verifier` as the standard VLM fallback path
+- Schema cache is tenant-isolated: all queries include `tenant_id` filter, no cross-tenant schema reuse
+- The 11 property tests for auto-schema discovery are defined in the design's Correctness Properties section and validate requirements 25–30

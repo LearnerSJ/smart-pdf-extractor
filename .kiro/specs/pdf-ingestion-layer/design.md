@@ -3419,3 +3419,945 @@ class ChunkedExtractionResult:
 | Delivery via message queue (SQS/RabbitMQ) | DeliveryPort supports it; concrete adapter deferred |
 | Delivery retry UI/dashboard | Logs available; UI is Month 2+ |
 | Admin dashboard for VLM usage monitoring | Usage events emitted as structured logs; dashboard is a separate future spec |
+
+
+---
+
+## Auto-Schema Discovery (Requirements 25–30)
+
+### Overview
+
+Auto-Schema Discovery extends the pipeline to handle documents that do not match any known static schema (bank_statement, custody_statement, swift_confirm). Instead of immediately abstaining with ERR_EXTRACT_002, the system uses VLM analysis to discover the document's structure, cache the discovered schema, and extract fields dynamically.
+
+**Motivating Example:** A 518-page daily futures/derivatives trade confirmation from Société Générale for Glencore Energy UK Ltd. The document has:
+- Repeated headers on every page (client name, address, account code, date)
+- Trade data in columns: Trade Date, Settlement Date, Action Type, Quantity, Contract Description, Exchange, Price, Currency, Debit/Credit
+- Multi-currency balance summary on the last content page (Beginning Balance, Ending Balance, Open Trade Equity, Total Equity, Net Liquidating Value, Margin Requirements)
+
+This document type is not covered by any static extractor, but its structure is highly regular and discoverable via VLM analysis of a small sample.
+
+### Architecture Changes
+
+The schema router gains a new branch: when `detect_schema()` returns "unknown" and the tenant has `vlm_enabled=True`, instead of producing an immediate abstention, the router delegates to `Auto_Schema_Discovery`. The discovery component analyses a sample, produces a `DiscoveredSchema`, and hands off to `Dynamic_Extractor` for full extraction.
+
+```mermaid
+graph TD
+    Assembler[Document Assembler] --> SchemaRouter{Schema Router}
+    SchemaRouter -->|bank_statement| BankExtractor[Bank Statement Extractor]
+    SchemaRouter -->|custody_statement| CustodyExtractor[Custody Statement Extractor]
+    SchemaRouter -->|swift_confirm| SwiftExtractor[SWIFT Confirm Extractor]
+    SchemaRouter -->|unknown + vlm_enabled| Discovery[Auto Schema Discovery]
+    SchemaRouter -->|unknown + vlm_disabled| Abstain[Abstain ERR_EXTRACT_002]
+
+    Discovery --> CacheCheck{Schema Cache Lookup}
+    CacheCheck -->|cache hit| DynamicExtractor[Dynamic Extractor]
+    CacheCheck -->|cache miss| VLMAnalysis[VLM Schema Analysis]
+    VLMAnalysis --> CacheStore[Store in Schema Cache]
+    CacheStore --> DynamicExtractor
+    VLMAnalysis -->|parse failure| DiscoveryAbstain[Abstain ERR_DISCOVERY_001]
+
+    DynamicExtractor --> Verifier[Verifier]
+    Verifier --> Validator[Validator]
+    Validator --> Packager[Packager]
+
+    BankExtractor --> VLMFallback[VLM Fallback]
+    CustodyExtractor --> VLMFallback
+    SwiftExtractor --> VLMFallback
+    VLMFallback --> Validator
+```
+
+### Sequence Diagram: Auto-Schema Discovery Flow
+
+```mermaid
+sequenceDiagram
+    participant SR as Schema Router
+    participant SC as Schema Cache
+    participant ASD as Auto Schema Discovery
+    participant R as Redactor
+    participant VLM as Bedrock VLM
+    participant DE as Dynamic Extractor
+    participant V as Verifier
+    participant VA as Validator
+
+    SR->>SR: detect_schema() returns "unknown"
+    SR->>SR: check tenant.vlm_enabled
+    alt vlm_enabled = False
+        SR-->>SR: Abstention(ERR_EXTRACT_002)
+    else vlm_enabled = True
+        SR->>SC: lookup(fingerprint=None, tenant_id)
+        Note over SR,SC: First time: no fingerprint yet
+        SC-->>SR: cache miss
+        SR->>ASD: discover(doc, tenant)
+        ASD->>ASD: select Discovery_Sample (first 5 pages)
+        ASD->>ASD: estimate_tokens(sample)
+        alt sample exceeds 80% context window
+            ASD->>ASD: reduce sample pages
+        end
+        ASD->>R: redact_page_text(sample, tenant_config)
+        R-->>ASD: redacted sample
+        ASD->>VLM: schema analysis prompt + redacted sample
+        VLM-->>ASD: JSON schema definition
+        alt VLM returns null or unparseable
+            ASD-->>SR: Abstention(ERR_DISCOVERY_001)
+        else valid response
+            ASD->>ASD: parse into DiscoveredSchema
+            ASD->>SC: store(schema, fingerprint, tenant_id)
+            ASD->>DE: extract(doc, discovered_schema, tenant)
+            loop Per extraction window (Tier 1/2/3)
+                DE->>R: redact_page_text(window, tenant_config)
+                R-->>DE: redacted window
+                DE->>VLM: extraction prompt with field definitions
+                VLM-->>DE: extracted values
+                DE->>V: verify each value against token stream
+                V-->>DE: VerificationOutcome per field
+            end
+            DE-->>VA: ExtractionResult (fields, tables, abstentions)
+        end
+    end
+```
+
+### Components and Interfaces
+
+#### Component: Auto_Schema_Discovery
+
+**Purpose**: Analyses a sample of an unknown document via VLM to discover its structure and produce a reusable schema definition.
+
+**Location**: `pipeline/discovery/auto_discovery.py`
+
+**Interface**:
+
+```python
+# pipeline/discovery/auto_discovery.py
+
+from __future__ import annotations
+
+import structlog
+from dataclasses import dataclass
+
+from pipeline.models import AssembledDocument, DiscoveredSchema, DiscoverySample
+from pipeline.ports import VLMClientPort, RedactorPort
+from pipeline.vlm.token_budget import TokenBudget
+from pipeline.discovery.schema_cache import SchemaCache, SchemaFingerprint
+from api.errors import ErrorCode
+from api.models.response import Abstention
+from api.models.tenant import TenantContext
+
+logger = structlog.get_logger()
+
+DEFAULT_SAMPLE_PAGES = 5
+
+
+class AutoSchemaDiscovery:
+    """Discovers document schema via VLM analysis of a page sample.
+
+    Design decisions:
+    - Sample defaults to first 5 pages (covers headers + first data rows)
+    - Sample is adaptively reduced if it exceeds 80% of context window
+    - Redaction applied before VLM call (same as standard VLM fallback)
+    - Discovery VLM calls count toward the job's token budget
+    - Circuit breaker respected (immediate abstention if open)
+    """
+
+    def __init__(
+        self,
+        vlm_client: VLMClientPort,
+        redactor: RedactorPort,
+        schema_cache: SchemaCache,
+    ):
+        self._vlm = vlm_client
+        self._redactor = redactor
+        self._cache = schema_cache
+
+    async def discover(
+        self,
+        doc: AssembledDocument,
+        tenant: TenantContext,
+        token_budget: TokenBudget,
+        trace_id: str,
+    ) -> DiscoveredSchema | Abstention:
+        """Attempt to discover the document's schema.
+
+        Steps:
+        1. Check schema cache for existing match (by partial fingerprint)
+        2. If cache miss: select sample pages, redact, send to VLM
+        3. Parse VLM response into DiscoveredSchema
+        4. Store in cache for future reuse
+
+        Returns DiscoveredSchema on success, Abstention on failure.
+        """
+        ...
+
+    def _select_sample(
+        self,
+        doc: AssembledDocument,
+        max_pages: int = DEFAULT_SAMPLE_PAGES,
+    ) -> DiscoverySample:
+        """Select pages for the discovery sample.
+
+        Default: first 5 pages. Adaptively reduced if token estimate
+        exceeds 80% of context window.
+        """
+        ...
+
+    def _build_analysis_prompt(self, sample_text: str) -> str:
+        """Build the VLM prompt for schema analysis."""
+        ...
+
+    def _parse_schema_response(self, raw_response: str) -> DiscoveredSchema | None:
+        """Parse VLM JSON response into a DiscoveredSchema.
+
+        Returns None if response is null, empty, or malformed JSON.
+        """
+        ...
+```
+
+#### Component: Dynamic_Extractor
+
+**Purpose**: Extracts fields and tables from a document using a DiscoveredSchema (rather than hardcoded regex patterns), driving VLM-based extraction with the discovered field definitions.
+
+**Location**: `pipeline/discovery/dynamic_extractor.py`
+
+**Interface**:
+
+```python
+# pipeline/discovery/dynamic_extractor.py
+
+from __future__ import annotations
+
+from pipeline.models import AssembledDocument, DiscoveredSchema
+from pipeline.ports import VLMClientPort, RedactorPort
+from pipeline.vlm.token_budget import TokenBudget
+from pipeline.vlm.verifier import Verifier
+from api.models.response import Field, Table, Abstention
+from api.models.tenant import TenantContext
+
+
+class DynamicExtractor:
+    """Extracts fields and tables using a VLM-discovered schema.
+
+    Design decisions:
+    - Uses the same chunked extraction tiers (1/2/3) as standard VLM fallback
+    - Each VLM call is redacted before sending
+    - Each extracted value is verified against the token stream (threshold 0.85)
+    - Output format matches static extractors exactly (fields, tables, abstentions)
+    - Provenance source = "vlm", extraction_rule = "discovered:{field_name}"
+    - schema_type = "discovered:{document_type_label}"
+    """
+
+    def __init__(
+        self,
+        vlm_client: VLMClientPort,
+        redactor: RedactorPort,
+        verifier: Verifier,
+    ):
+        self._vlm = vlm_client
+        self._redactor = redactor
+        self._verifier = verifier
+
+    async def extract(
+        self,
+        doc: AssembledDocument,
+        schema: DiscoveredSchema,
+        tenant: TenantContext,
+        token_budget: TokenBudget,
+        trace_id: str,
+    ) -> dict:
+        """Extract all fields and tables defined in the discovered schema.
+
+        Returns dict with keys: 'fields', 'tables', 'abstentions', 'schema_type'.
+        Output structure is identical to static schema extractors.
+        """
+        ...
+
+    def _build_field_extraction_prompt(
+        self,
+        schema: DiscoveredSchema,
+        page_text: str,
+    ) -> str:
+        """Build extraction prompt using discovered field definitions."""
+        ...
+
+    def _build_table_extraction_prompt(
+        self,
+        schema: DiscoveredSchema,
+        page_text: str,
+    ) -> str:
+        """Build table extraction prompt using discovered headers."""
+        ...
+```
+
+#### Component: Schema_Cache
+
+**Purpose**: Persistent store of previously discovered schemas, keyed by fingerprint (institution + document_type_label), enabling reuse without repeated VLM discovery calls.
+
+**Location**: `pipeline/discovery/schema_cache.py`
+
+**Interface**:
+
+```python
+# pipeline/discovery/schema_cache.py
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from pipeline.models import DiscoveredSchema, SchemaFingerprint
+
+
+class SchemaCache:
+    """Persistent cache for discovered schemas.
+
+    Design decisions:
+    - Backed by PostgreSQL (same DB as jobs/results)
+    - Tenant-isolated: all queries include tenant_id filter
+    - Keyed by SchemaFingerprint (institution + document_type_label)
+    - Tracks created_at and usage_count for observability
+    - Supports invalidation via DELETE endpoint
+    """
+
+    async def lookup(
+        self,
+        fingerprint: SchemaFingerprint,
+        tenant_id: str,
+    ) -> DiscoveredSchema | None:
+        """Look up a cached schema by fingerprint.
+
+        Returns None on cache miss. Increments usage_count on hit.
+        """
+        ...
+
+    async def store(
+        self,
+        schema: DiscoveredSchema,
+        fingerprint: SchemaFingerprint,
+        tenant_id: str,
+    ) -> None:
+        """Store a discovered schema in the cache.
+
+        Sets created_at to now, usage_count to 1.
+        Overwrites if fingerprint already exists for this tenant.
+        """
+        ...
+
+    async def invalidate(
+        self,
+        fingerprint: SchemaFingerprint,
+        tenant_id: str,
+    ) -> bool:
+        """Remove a cached schema. Returns True if entry existed."""
+        ...
+
+    async def list_for_tenant(self, tenant_id: str) -> list[dict]:
+        """List all cached schemas for a tenant (admin/debug use)."""
+        ...
+```
+
+### VLM Prompt Design for Schema Analysis
+
+The schema analysis prompt is the core of the discovery feature. It asks Claude to identify the document's structure from a small sample (first 5 pages).
+
+```python
+SCHEMA_ANALYSIS_PROMPT = '''You are analysing a financial document to identify its structure.
+Examine the provided pages and identify:
+
+1. **document_type_label**: A concise human-readable label for this document type
+   (e.g., "futures_trade_confirmation", "derivatives_daily_statement", "margin_call_notice")
+
+2. **institution**: The issuing institution name (e.g., "Société Générale", "JP Morgan")
+
+3. **metadata_fields**: Header/summary fields that appear once or on every page.
+   For each field provide:
+   - field_name: snake_case identifier (e.g., "account_code", "statement_date")
+   - description: what the field contains
+   - location_hint: where it typically appears ("header", "footer", "first_page", "last_page")
+
+4. **table_definitions**: Tabular data structures in the document.
+   For each table provide:
+   - table_type: descriptive name (e.g., "trades", "positions", "balance_summary")
+   - expected_headers: list of column header strings as they appear in the document
+   - data_pattern: brief description of what each row represents
+   - location_hint: where the table appears ("body_repeating", "last_page", "first_page")
+
+Respond ONLY with valid JSON matching this schema:
+{{
+  "document_type_label": "string",
+  "institution": "string",
+  "metadata_fields": [
+    {{
+      "field_name": "string",
+      "description": "string",
+      "location_hint": "header|footer|first_page|last_page"
+    }}
+  ],
+  "table_definitions": [
+    {{
+      "table_type": "string",
+      "expected_headers": ["string", ...],
+      "data_pattern": "string",
+      "location_hint": "body_repeating|last_page|first_page"
+    }}
+  ]
+}}
+
+---
+DOCUMENT SAMPLE (pages 1-{sample_page_count}):
+---
+{redacted_sample_text}
+'''
+```
+
+**Example expected output** for the Société Générale futures confirmation:
+
+```json
+{
+  "document_type_label": "futures_trade_confirmation",
+  "institution": "Société Générale",
+  "metadata_fields": [
+    {"field_name": "client_name", "description": "Name of the client", "location_hint": "header"},
+    {"field_name": "account_code", "description": "Trading account identifier", "location_hint": "header"},
+    {"field_name": "statement_date", "description": "Date of the statement", "location_hint": "header"},
+    {"field_name": "client_address", "description": "Client postal address", "location_hint": "header"}
+  ],
+  "table_definitions": [
+    {
+      "table_type": "trades",
+      "expected_headers": ["Trade Date", "Settlement Date", "Action Type", "Quantity", "Contract Description", "Exchange", "Price", "Currency", "Debit/Credit"],
+      "data_pattern": "One row per trade execution",
+      "location_hint": "body_repeating"
+    },
+    {
+      "table_type": "balance_summary",
+      "expected_headers": ["Currency", "Beginning Balance", "Ending Balance", "Open Trade Equity", "Total Equity", "Net Liquidating Value", "Margin Requirements"],
+      "data_pattern": "One row per currency with account balances",
+      "location_hint": "last_page"
+    }
+  ]
+}
+```
+
+### Data Models
+
+```python
+# pipeline/models.py (additions for auto-schema discovery)
+
+@dataclass
+class SchemaFingerprint:
+    """Composite key for schema cache lookup.
+
+    Derived from institution name (normalised lowercase, stripped) and
+    document_type_label. Together these identify a unique document structure.
+    """
+    institution: str        # normalised: lowercase, stripped, spaces→underscores
+    document_type_label: str  # as returned by VLM (e.g., "futures_trade_confirmation")
+
+    @property
+    def key(self) -> str:
+        """String representation for DB storage and URL paths."""
+        inst = self.institution.lower().strip().replace(" ", "_")
+        return f"{inst}::{self.document_type_label}"
+
+    @classmethod
+    def from_key(cls, key: str) -> "SchemaFingerprint":
+        """Parse a fingerprint key string back into components."""
+        parts = key.split("::", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid fingerprint key: {key}")
+        return cls(institution=parts[0], document_type_label=parts[1])
+
+
+@dataclass
+class DiscoveredFieldDefinition:
+    """A single field definition discovered by VLM analysis."""
+    field_name: str          # snake_case identifier
+    description: str         # what the field contains
+    location_hint: str       # "header", "footer", "first_page", "last_page"
+
+
+@dataclass
+class DiscoveredTableDefinition:
+    """A table structure discovered by VLM analysis."""
+    table_type: str              # e.g., "trades", "balance_summary"
+    expected_headers: list[str]  # column headers as they appear in the document
+    data_pattern: str            # description of row content
+    location_hint: str           # "body_repeating", "last_page", "first_page"
+
+
+@dataclass
+class DiscoveredSchema:
+    """VLM-generated schema definition for an unrecognised document type.
+
+    Produced by Auto_Schema_Discovery and consumed by Dynamic_Extractor.
+    Cached in Schema_Cache keyed by SchemaFingerprint.
+    """
+    document_type_label: str                     # e.g., "futures_trade_confirmation"
+    institution: str                             # e.g., "Société Générale"
+    metadata_fields: list[DiscoveredFieldDefinition]
+    table_definitions: list[DiscoveredTableDefinition]
+    fingerprint: SchemaFingerprint = field(init=False)
+
+    def __post_init__(self):
+        self.fingerprint = SchemaFingerprint(
+            institution=self.institution,
+            document_type_label=self.document_type_label,
+        )
+
+
+@dataclass
+class DiscoverySample:
+    """A subset of document pages sent to VLM for schema analysis.
+
+    Kept small to respect token budgets. Default: first 5 pages.
+    Adaptively reduced if estimated tokens exceed 80% of context window.
+    """
+    page_texts: list[str]       # text content of each sampled page
+    page_numbers: list[int]     # which pages were sampled (1-indexed)
+    estimated_tokens: int       # token estimate for the combined sample
+
+    @property
+    def page_count(self) -> int:
+        return len(self.page_texts)
+
+    @property
+    def combined_text(self) -> str:
+        """Concatenate all page texts with page markers."""
+        parts = []
+        for num, text in zip(self.page_numbers, self.page_texts):
+            parts.append(f"--- PAGE {num} ---\n{text}")
+        return "\n\n".join(parts)
+```
+
+### Database Schema for Schema Cache
+
+```sql
+-- db/migrations/versions/20250XXX_auto_schema_cache.py
+
+CREATE TABLE discovered_schemas (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id       UUID NOT NULL REFERENCES tenants(id),
+    fingerprint_key VARCHAR(512) NOT NULL,  -- "institution::document_type_label"
+    institution     VARCHAR(256) NOT NULL,
+    document_type_label VARCHAR(256) NOT NULL,
+    schema_json     JSONB NOT NULL,         -- full DiscoveredSchema serialised
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    usage_count     INTEGER NOT NULL DEFAULT 1,
+
+    CONSTRAINT uq_tenant_fingerprint UNIQUE (tenant_id, fingerprint_key)
+);
+
+CREATE INDEX idx_discovered_schemas_tenant ON discovered_schemas(tenant_id);
+CREATE INDEX idx_discovered_schemas_fingerprint ON discovered_schemas(tenant_id, fingerprint_key);
+```
+
+### Integration with Existing Infrastructure
+
+#### Token Budget Integration
+
+Discovery VLM calls count toward the same per-job `TokenBudget` as extraction calls. The `AutoSchemaDiscovery` component receives the budget and records usage:
+
+```python
+# Inside AutoSchemaDiscovery.discover():
+
+# Check budget before making discovery call
+if not token_budget.can_proceed():
+    return Abstention(
+        field=None, table_id=None,
+        reason=ErrorCode.VLM_BUDGET_EXCEEDED,
+        detail="Token budget exhausted before schema discovery",
+        vlm_attempted=False,
+    )
+
+# After VLM call:
+token_budget.record_usage(
+    input_tokens=response.input_tokens,
+    output_tokens=response.output_tokens,
+)
+```
+
+#### Circuit Breaker Integration
+
+The existing circuit breaker on `BedrockVLMClient` is respected. If the breaker is open, `AutoSchemaDiscovery` abstains immediately:
+
+```python
+# Inside AutoSchemaDiscovery.discover():
+
+if self._vlm.circuit_breaker_open():
+    logger.warning("discovery.circuit_breaker_open", tenant_id=tenant.id)
+    return Abstention(
+        field=None, table_id=None,
+        reason=ErrorCode.VLM_BEDROCK_THROTTLED,
+        detail="Circuit breaker open — cannot attempt schema discovery",
+        vlm_attempted=False,
+    )
+```
+
+#### Redaction Integration
+
+The same `RedactorPort` and tenant redaction config used by standard VLM fallback is applied to discovery samples and dynamic extraction windows:
+
+```python
+# Before sending sample to VLM:
+redacted_text, redaction_log = self._redactor.redact_page_text(
+    sample.combined_text,
+    tenant.redaction_config,
+)
+logger.info("discovery.redaction_applied", entities_redacted=redaction_log.redacted_count)
+```
+
+#### Verifier Integration
+
+Dynamic extraction results are verified against the original (unredacted) token stream using the same `Verifier` with fuzzy threshold 0.85:
+
+```python
+# Inside DynamicExtractor, per extracted field:
+verification = self._verifier.verify(
+    extracted_value=vlm_result.value,
+    token_stream=doc.token_stream,
+    fuzzy_threshold=0.85,
+)
+if not verification.verified:
+    abstentions.append(Abstention(
+        field=field_name,
+        table_id=None,
+        reason=ErrorCode.VLM_VALUE_UNVERIFIABLE,
+        detail=f"Discovered field '{field_name}' value not found in token stream",
+        vlm_attempted=True,
+    ))
+```
+
+#### Schema Router Modification
+
+The existing `route_and_extract()` function in `pipeline/schemas/router.py` is modified to delegate to discovery:
+
+```python
+# pipeline/schemas/router.py (modified)
+
+async def route_and_extract(
+    doc: AssembledDocument,
+    schema_type_hint: str | None = None,
+    tenant: TenantContext | None = None,
+    vlm_client: VLMClientPort | None = None,
+    redactor: RedactorPort | None = None,
+    schema_cache: SchemaCache | None = None,
+    token_budget: TokenBudget | None = None,
+    trace_id: str = "",
+) -> tuple[str, dict]:
+    """Route to the appropriate extractor and extract fields.
+
+    Modified to support auto-schema discovery when schema is unknown
+    and tenant has VLM enabled.
+    """
+    # Determine schema type
+    if schema_type_hint and schema_type_hint != "unknown":
+        schema_type = schema_type_hint
+    else:
+        schema_type = detect_schema(doc)
+
+    # Handle unknown schema — try auto-discovery if VLM enabled
+    if schema_type == "unknown":
+        if tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache:
+            discovery = AutoSchemaDiscovery(vlm_client, redactor, schema_cache)
+            result = await discovery.discover(doc, tenant, token_budget, trace_id)
+
+            if isinstance(result, Abstention):
+                return "unknown", {
+                    "fields": {},
+                    "tables": [],
+                    "abstentions": [result],
+                }
+
+            # Discovery succeeded — extract using discovered schema
+            verifier = Verifier(fuzzy_threshold=0.85)
+            extractor = DynamicExtractor(vlm_client, redactor, verifier)
+            extraction_result = await extractor.extract(
+                doc, result, tenant, token_budget, trace_id
+            )
+            return extraction_result.get("schema_type", f"discovered:{result.document_type_label}"), extraction_result
+
+        # VLM not available — fall back to standard abstention
+        abstention = Abstention(
+            field=None, table_id=None,
+            reason=ErrorCode.EXTRACTION_SCHEMA_UNKNOWN,
+            detail="Document structural signals do not match any known schema",
+            vlm_attempted=False,
+        )
+        return "unknown", {
+            "fields": {},
+            "tables": [],
+            "abstentions": [abstention],
+        }
+
+    # Known schema — use static extractor (unchanged)
+    extractor = get_extractor(schema_type)
+    if extractor is None:
+        abstention = Abstention(
+            field=None, table_id=None,
+            reason=ErrorCode.EXTRACTION_SCHEMA_UNKNOWN,
+            detail=f"No extractor available for schema type '{schema_type}'",
+            vlm_attempted=False,
+        )
+        return "unknown", {
+            "fields": {},
+            "tables": [],
+            "abstentions": [abstention],
+        }
+
+    result = extractor.extract(doc)
+    return schema_type, result
+```
+
+### Error Codes
+
+```python
+# api/errors.py (additions)
+
+class ErrorCode:
+    # ... existing codes ...
+
+    # Discovery
+    DISCOVERY_SCHEMA_ANALYSIS_FAILED: str = "ERR_DISCOVERY_001"
+    DISCOVERY_DYNAMIC_EXTRACTION_FAILED: str = "ERR_DISCOVERY_002"
+    DISCOVERY_CACHE_LOOKUP_FAILED: str = "ERR_DISCOVERY_003"
+```
+
+| Code | Meaning | Triggered When |
+|---|---|---|
+| ERR_DISCOVERY_001 | Schema analysis failed | VLM returns null/unparseable during discovery, or discovery prompt exceeds budget |
+| ERR_DISCOVERY_002 | Dynamic extraction failed | Dynamic extractor encounters unrecoverable error during field/table extraction |
+| ERR_DISCOVERY_003 | Cache lookup failed | Database error when querying schema cache (not a cache miss — that's normal flow) |
+
+### Configuration Additions
+
+```python
+# api/config.py (additions)
+
+class Settings(BaseSettings):
+    # ... existing settings ...
+
+    # Auto-Schema Discovery
+    discovery_sample_pages: int = 5
+    discovery_max_context_ratio: float = 0.80  # max fraction of context window for sample
+    discovery_cache_enabled: bool = True
+```
+
+### API Endpoint: Schema Cache Invalidation
+
+```python
+# api/routes/schema_cache.py
+
+from fastapi import APIRouter, Depends, HTTPException
+from api.middleware.auth import resolve_tenant
+from api.models.response import APIResponse, ResponseMeta
+from api.models.tenant import TenantContext
+from pipeline.discovery.schema_cache import SchemaCache, SchemaFingerprint
+
+router = APIRouter()
+
+
+@router.delete("/v1/tenants/{tenant_id}/schema-cache/{fingerprint}")
+async def invalidate_cached_schema(
+    tenant_id: str,
+    fingerprint: str,
+    tenant: TenantContext = Depends(resolve_tenant),
+    schema_cache: SchemaCache = Depends(get_schema_cache),
+) -> APIResponse[dict]:
+    """Invalidate a cached discovered schema.
+
+    The fingerprint is the URL-encoded fingerprint key
+    (e.g., "societe_generale::futures_trade_confirmation").
+
+    Use this when a document's structure has changed and the cached
+    schema is no longer accurate.
+    """
+    if str(tenant.id) != tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID mismatch")
+
+    fp = SchemaFingerprint.from_key(fingerprint)
+    deleted = await schema_cache.invalidate(fp, tenant_id)
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Schema not found in cache")
+
+    return APIResponse(
+        data={"fingerprint": fingerprint, "deleted": True},
+        meta=ResponseMeta(request_id=trace_id, timestamp=now_iso()),
+    )
+
+
+@router.get("/v1/tenants/{tenant_id}/schema-cache")
+async def list_cached_schemas(
+    tenant_id: str,
+    tenant: TenantContext = Depends(resolve_tenant),
+    schema_cache: SchemaCache = Depends(get_schema_cache),
+) -> APIResponse[list]:
+    """List all cached schemas for the authenticated tenant."""
+    if str(tenant.id) != tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant ID mismatch")
+
+    entries = await schema_cache.list_for_tenant(tenant_id)
+    return APIResponse(
+        data=entries,
+        meta=ResponseMeta(request_id=trace_id, timestamp=now_iso()),
+    )
+```
+
+### Log Events
+
+| Event key | Logged when | Fields |
+|---|---|---|
+| `discovery.triggered` | Auto-discovery initiated | job_id, tenant_id, filename |
+| `discovery.cache_hit` | Cached schema found and reused | job_id, tenant_id, fingerprint, usage_count |
+| `discovery.cache_miss` | No cached schema found | job_id, tenant_id |
+| `discovery.schema_analysed` | VLM schema analysis complete | job_id, document_type_label, institution, fields_count, tables_count |
+| `discovery.extraction_complete` | Dynamic extraction finished | job_id, tenant_id, schema_type, fields_extracted, fields_abstained, tables_extracted |
+| `discovery.failed` | Discovery failed at any stage | job_id, tenant_id, error_code, detail |
+| `discovery.sample_reduced` | Sample pages reduced to fit budget | job_id, original_pages, reduced_pages, estimated_tokens |
+
+### Validator Behaviour for Discovered Schemas
+
+When `schema_type` starts with `"discovered:"`, the Validator applies only generic validators:
+
+| Validator | Applies to discovered schemas? | Rationale |
+|---|---|---|
+| Date range (not future, not >10y past) | Yes | Universal constraint |
+| Currency code (ISO 4217) | Yes | Universal constraint |
+| Provenance integrity (page, bbox) | Yes | Universal constraint |
+| IBAN checksum (mod-97) | No | Schema-specific — discovered schema may not have IBANs |
+| ISIN check digit | No | Schema-specific |
+| BIC format | No | Schema-specific |
+| Arithmetic balance | No | Requires knowledge of which fields sum to what |
+
+```python
+# pipeline/validators.py (modification)
+
+def select_validators(schema_type: str) -> list[Callable]:
+    """Select applicable validators based on schema type.
+
+    Discovered schemas get only generic validators since we don't know
+    which schema-specific constraints apply.
+    """
+    generic = [
+        validate_date_range,
+        validate_currency_code,
+        validate_provenance_integrity,
+    ]
+
+    if schema_type.startswith("discovered:"):
+        return generic
+
+    # Static schemas get full validation suite
+    return generic + [
+        validate_iban_checksum,
+        validate_isin_check_digit,
+        validate_bic_format,
+        validate_arithmetic_balance,
+    ]
+```
+
+
+### Correctness Properties
+
+*A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
+
+#### Property 1: Discovery routing decision is determined by vlm_enabled
+
+*For any* document where `detect_schema()` returns "unknown", the routing decision SHALL be: trigger Auto_Schema_Discovery if and only if `tenant.vlm_enabled` is True. When `vlm_enabled` is False, the system SHALL produce an Abstention with error code ERR_EXTRACT_002.
+
+**Validates: Requirements 25.1, 25.2**
+
+#### Property 2: Token budget accounting includes discovery calls
+
+*For any* job that triggers auto-schema discovery, the `TokenBudget.total_consumed` after discovery completion SHALL equal the sum of all individual VLM call token counts (discovery analysis + dynamic extraction windows). No VLM call is unaccounted.
+
+**Validates: Requirements 25.4**
+
+#### Property 3: Discovery sample respects context window
+
+*For any* document, the discovery sample sent to the VLM SHALL have an estimated token count at most 80% of `vlm_client.max_context_tokens()`. If the default 5 pages exceed this limit, the sample SHALL be reduced to fewer pages until it fits.
+
+**Validates: Requirements 26.1, 26.6**
+
+#### Property 4: Valid VLM response produces complete DiscoveredSchema
+
+*For any* valid JSON response from the VLM that conforms to the expected schema structure, the parsed `DiscoveredSchema` SHALL contain a non-empty `document_type_label`, a non-empty `institution`, and at least one entry in either `metadata_fields` or `table_definitions`.
+
+**Validates: Requirements 26.3**
+
+#### Property 5: Invalid VLM response produces correct abstention
+
+*For any* null, empty, or malformed (non-JSON, missing required fields) VLM response during schema analysis, the system SHALL produce an Abstention with error code ERR_DISCOVERY_001 (equivalently ERR_VLM_003 for null responses).
+
+**Validates: Requirements 26.4**
+
+#### Property 6: Schema cache round-trip
+
+*For any* `DiscoveredSchema` stored in the cache with a given `SchemaFingerprint` and `tenant_id`, looking up that same fingerprint and tenant_id SHALL return a schema equivalent to the one stored (same document_type_label, institution, field definitions, and table definitions).
+
+**Validates: Requirements 28.1, 28.2**
+
+#### Property 7: Schema cache tenant isolation
+
+*For any* two distinct tenant IDs A and B, and any `DiscoveredSchema` stored by tenant A, a cache lookup by tenant B with the same `SchemaFingerprint` SHALL return None (cache miss).
+
+**Validates: Requirements 28.6**
+
+#### Property 8: Dynamic extraction output format compliance
+
+*For any* extraction result produced by `DynamicExtractor`, every field SHALL have: `provenance.source == "vlm"`, `provenance.extraction_rule` starting with `"discovered:"`, `confidence` as a float in [0.0, 1.0], and the result's `schema_type` SHALL equal `"discovered:{document_type_label}"`.
+
+**Validates: Requirements 29.1, 29.2, 29.3, 29.4**
+
+#### Property 9: Validator selection for discovered schemas
+
+*For any* extraction result where `schema_type` starts with `"discovered:"`, the Validator SHALL execute date_range, currency_code, and provenance_integrity validators, and SHALL NOT execute IBAN, ISIN, BIC, or arithmetic_balance validators.
+
+**Validates: Requirements 29.6**
+
+#### Property 10: Discovery failure produces correct error codes
+
+*For any* failure during auto-schema discovery, the produced Abstention SHALL reference one of ERR_DISCOVERY_001 (analysis failed), ERR_DISCOVERY_002 (extraction failed), or ERR_DISCOVERY_003 (cache error) — never a generic ERR_EXTRACT_002 or raw string.
+
+**Validates: Requirements 30.5**
+
+#### Property 11: Dynamic extractor verifies all values
+
+*For any* field value extracted by `DynamicExtractor` via VLM, the value SHALL be verified against the original token stream with fuzzy threshold 0.85. If verification fails, the field SHALL appear in abstentions with ERR_VLM_004, not in the extracted fields.
+
+**Validates: Requirements 27.6**
+
+### Testing Strategy
+
+**Dual Testing Approach:**
+
+- **Unit tests**: Verify specific examples (prompt construction, response parsing, cache CRUD, routing decisions with specific tenant configs)
+- **Property tests**: Verify universal properties across all inputs (routing invariants, output format compliance, cache isolation, budget accounting)
+
+**Property-Based Testing Configuration:**
+
+- Library: `hypothesis` (Python)
+- Minimum 100 iterations per property test
+- Each property test tagged with: `Feature: auto-schema-discovery, Property {number}: {property_text}`
+
+**Test Boundaries:**
+
+| Component | Test Type | What's Mocked |
+|---|---|---|
+| Schema Router (routing decision) | Property test | VLM client, cache |
+| AutoSchemaDiscovery (sample selection) | Property test | VLM client (returns fixture) |
+| AutoSchemaDiscovery (response parsing) | Property test | None (pure function) |
+| DynamicExtractor (output format) | Property test | VLM client, redactor |
+| SchemaCache (round-trip, isolation) | Property test | Database (in-memory SQLite) |
+| Validator selection | Property test | None (pure function) |
+| Token budget accounting | Property test | None (pure dataclass) |
+| VLM prompt construction | Unit test | None |
+| DELETE endpoint | Integration test | Real DB |
+| End-to-end discovery flow | Integration test | VLM mocked, real DB |
+
+**Key Test Strategies:**
+
+1. **Routing decision property**: Generate random `(schema_type, vlm_enabled)` pairs. Assert routing matches spec.
+2. **Schema parsing property**: Generate random valid JSON matching the schema structure via Hypothesis `st.fixed_dictionaries`. Assert DiscoveredSchema is complete.
+3. **Cache isolation property**: Generate random tenant pairs and schemas. Store under tenant A, lookup under tenant B. Assert miss.
+4. **Output format property**: Generate random DiscoveredSchema + mock VLM responses. Assert all fields have correct provenance, confidence, and schema_type prefix.
+5. **Budget accounting property**: Generate random sequences of (input_tokens, output_tokens) pairs. Assert `total_consumed == sum(all pairs)`.

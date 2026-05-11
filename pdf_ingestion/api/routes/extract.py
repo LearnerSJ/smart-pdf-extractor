@@ -109,6 +109,7 @@ async def submit_extraction(
         schema_type=schema_type,
         tenant=tenant,
         trace_id=trace_id,
+        schema_cache=getattr(request.app.state, "schema_cache", None),
     ))
 
     return APIResponse[JobResponse](
@@ -133,6 +134,7 @@ async def _run_pipeline_background(
     schema_type: str | None,
     tenant: "TenantContext",
     trace_id: str,
+    schema_cache: "SchemaCache | None" = None,
 ) -> None:
     """Run the extraction pipeline as a background task."""
     try:
@@ -172,6 +174,7 @@ async def _run_pipeline_background(
             trace_id=trace_id,
             schema_type_hint=schema_type,
             job_id=job_id,
+            schema_cache=schema_cache,
         )
 
         if pipeline_result.output is not None:

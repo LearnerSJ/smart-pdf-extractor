@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_from: str = "alerts@pdf-ingestion.local"
 
+    # Auto-Schema Discovery
+    discovery_sample_pages: int = 5
+    discovery_max_context_ratio: float = 0.80
+    discovery_cache_enabled: bool = True
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

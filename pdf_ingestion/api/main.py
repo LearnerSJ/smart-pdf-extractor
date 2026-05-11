@@ -35,6 +35,7 @@ from api.routes.admin_alerts import router as admin_alerts_router
 # Alert engine and notification dispatcher
 from pipeline.alerts.engine import AlertEngine
 from pipeline.alerts.notifier import NotificationDispatcher
+from pipeline.discovery.schema_cache import SchemaCache
 
 
 def _configure_structlog() -> None:
@@ -101,6 +102,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.ocr_client = None
     app.state.redactor = None
     app.state.delivery_client = None
+
+    # ── Schema Cache (auto-discovery) ────────────────────────────────────────
+    app.state.schema_cache = SchemaCache()
 
     # ── Alert Engine ─────────────────────────────────────────────────────────
     alert_engine = AlertEngine()

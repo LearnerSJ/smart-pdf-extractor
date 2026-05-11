@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 import pdfplumber
 import structlog
+
+if TYPE_CHECKING:
+    from pipeline.discovery.schema_cache import SchemaCache
 
 from api.config import Settings
 from api.errors import ErrorCode
@@ -38,7 +41,7 @@ from pipeline.models import (
 )
 from pipeline.packager import package_result
 from pipeline.ports import DeliveryPort, OCRClientPort, RedactorPort, VLMClientPort
-from pipeline.schemas.router import route_and_extract
+from pipeline.schemas.router import route_and_extract, route_and_extract_async
 from pipeline.triangulation import triangulate_table
 from pipeline.validator import run_validators
 from pipeline.vlm.chunked_extractor import (
@@ -82,6 +85,7 @@ async def process_document(
     schema_type_hint: str | None = None,
     job_id: str | None = None,
     dedup_lookup: Callable[[str], CachedResult | None] | None = None,
+    schema_cache: "SchemaCache | None" = None,
 ) -> PipelineResult:
     """Process a single document through the full extraction pipeline.
 
@@ -328,9 +332,29 @@ async def process_document(
         if section.dominant_schema != "unknown" and not section_schema_hint:
             section_schema_hint = section.dominant_schema
 
-        section_schema, section_result = route_and_extract(
-            section_assembled, schema_type_hint=section_schema_hint
-        )
+        # Use async discovery path when tenant has VLM enabled and schema_cache
+        # is available. This enables auto-schema discovery for unknown documents.
+        if tenant.vlm_enabled and schema_cache is not None:
+            from pipeline.vlm.token_budget import TokenBudget as _TB
+
+            discovery_budget = _TB(
+                max_tokens=settings.vlm_max_tokens_per_job,
+                budget_exceeded_action=settings.vlm_budget_exceeded_action,
+            )
+            section_schema, section_result = await route_and_extract_async(
+                section_assembled,
+                schema_type_hint=section_schema_hint,
+                tenant=tenant,
+                vlm_client=ports.vlm_client,
+                redactor=ports.redactor,
+                schema_cache=schema_cache,
+                token_budget=discovery_budget,
+                trace_id=trace_id,
+            )
+        else:
+            section_schema, section_result = route_and_extract(
+                section_assembled, schema_type_hint=section_schema_hint
+            )
 
         section_fields: dict[str, Field] = section_result.get("fields", {})
         section_tables: list[Table] = section_result.get("tables", [])

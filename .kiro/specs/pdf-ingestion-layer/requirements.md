@@ -32,6 +32,12 @@ The PDF Ingestion Layer is a production-ready extraction service for the reconci
 - **TokenBudget**: A per-job tracker that monitors cumulative token consumption across all LLM calls and enforces configurable limits (flag, skip, or proceed)
 - **PageWindow**: A contiguous range of pages sent in a single LLM call during chunked extraction, with configurable overlap between adjacent windows
 - **UsageEvent**: A structured log event emitted per LLM call and per job containing token consumption, model ID, and cost attribution metadata for downstream monitoring
+- **Auto_Schema_Discovery**: The component that uses VLM analysis to identify document type and extract relevant fields when no static schema matches, producing a DiscoveredSchema for the document
+- **DiscoveredSchema**: A VLM-generated schema definition containing document_type_label, metadata fields, and tabular data structure (column headers and data patterns) for an unrecognised document type
+- **Schema_Cache**: A persistent store of previously discovered schemas keyed by a fingerprint (institution + document_type_label), enabling reuse on future documents of the same type without repeated VLM discovery calls
+- **Schema_Fingerprint**: A composite key derived from institution name and document_type_label used to look up cached DiscoveredSchemas
+- **Discovery_Sample**: A subset of document pages (default first 5 pages) sent to the VLM for schema analysis, kept small to respect token budgets
+- **Dynamic_Extractor**: The extraction component that uses a DiscoveredSchema (rather than hardcoded regex patterns) to drive VLM-based field and table extraction on the full document
 
 ## Requirements
 
@@ -339,3 +345,81 @@ The PDF Ingestion Layer is a production-ready extraction service for the reconci
 6. THE Pipeline SHALL emit a structured `vlm.window_usage` log event per LLM call containing job_id, tenant_id, model_id, input_tokens, output_tokens, and window metadata
 7. THE Pipeline SHALL emit a `vlm.job_usage_summary` log event at job completion containing aggregate token totals, tier used, and budget status
 8. THE usage events SHALL include cost attribution metadata (tenant_id, job_id, schema_type) for downstream consumption by a future admin dashboard
+
+### Requirement 25: Auto-Schema Discovery Trigger
+
+**User Story:** As a reconciliation operator, I want the pipeline to automatically discover the document type and relevant fields when a document doesn't match any known schema, so that unknown document types (e.g., futures trade confirmations, derivative statements) are still processed instead of being rejected outright.
+
+#### Acceptance Criteria
+
+1. WHEN the Schema_Extractor detects schema_type "unknown" and the tenant has vlm_enabled set to True, THE Auto_Schema_Discovery SHALL be triggered instead of producing an immediate ERR_EXTRACT_002 abstention
+2. IF the tenant has vlm_enabled set to False, THEN THE Pipeline SHALL retain the existing behaviour: abstain with error code ERR_EXTRACT_002 without invoking Auto_Schema_Discovery
+3. WHEN Auto_Schema_Discovery is triggered, THE Pipeline SHALL log a structured `discovery.triggered` event containing job_id, tenant_id, and document filename
+4. THE Auto_Schema_Discovery SHALL respect the per-job TokenBudget — discovery VLM calls count toward the same budget as extraction calls
+5. WHILE the circuit breaker for BedrockVLMClient is open, THE Auto_Schema_Discovery SHALL abstain immediately with error code ERR_VLM_005 without attempting discovery
+
+### Requirement 26: VLM-Based Schema Analysis
+
+**User Story:** As a reconciliation operator, I want the VLM to analyse a sample of the unknown document and identify its structure, so that extraction can proceed with the correct field definitions rather than guessing bank statement fields.
+
+#### Acceptance Criteria
+
+1. WHEN Auto_Schema_Discovery is triggered, THE Auto_Schema_Discovery SHALL send a Discovery_Sample (default first 5 pages) to the VLM for structural analysis
+2. THE Auto_Schema_Discovery SHALL request the VLM to identify: document_type_label (a human-readable type name), institution name, metadata fields present (with field names and locations), and tabular data structure (column headers and data patterns)
+3. THE Auto_Schema_Discovery SHALL produce a DiscoveredSchema object containing document_type_label, institution, a list of metadata field definitions, and a list of table definitions with expected headers
+4. IF the VLM returns null or an unparseable response during schema analysis, THEN THE Auto_Schema_Discovery SHALL abstain with error code ERR_VLM_003 and detail "Schema discovery failed: VLM returned no usable schema"
+5. THE Auto_Schema_Discovery SHALL apply Presidio redaction to the Discovery_Sample before sending it to the VLM, using the tenant's configured redaction settings
+6. WHEN the Discovery_Sample exceeds 80% of the model's context window, THE Auto_Schema_Discovery SHALL reduce the sample size (fewer pages) until it fits within budget
+
+### Requirement 27: Dynamic Extraction Using Discovered Schema
+
+**User Story:** As a reconciliation operator, I want the discovered schema to drive extraction of the full document, so that fields and tables are extracted using the correct structure rather than hardcoded bank statement patterns.
+
+#### Acceptance Criteria
+
+1. WHEN a DiscoveredSchema is produced, THE Dynamic_Extractor SHALL use it to extract metadata fields and tables from the full document via VLM calls
+2. THE Dynamic_Extractor SHALL use the DiscoveredSchema's field definitions as the extraction prompt — requesting only the fields identified during discovery
+3. THE Dynamic_Extractor SHALL use the DiscoveredSchema's table definitions (expected headers) to guide tabular data extraction
+4. THE Dynamic_Extractor SHALL apply the same chunked extraction strategy (Tier 1/2/3) as the standard VLM_Fallback based on document size and token budget
+5. THE Dynamic_Extractor SHALL apply Presidio redaction before each VLM call using the tenant's configured redaction settings
+6. THE Dynamic_Extractor SHALL verify each VLM-extracted value against the original token stream using the Verifier with fuzzy threshold 0.85
+7. IF a field from the DiscoveredSchema cannot be extracted, THEN THE Dynamic_Extractor SHALL produce an Abstention with error code ERR_EXTRACT_001 and detail referencing the discovered field name
+
+### Requirement 28: Discovered Schema Caching and Reuse
+
+**User Story:** As a system operator, I want discovered schemas cached and reused for future documents of the same type, so that repeated VLM discovery calls are avoided for documents from the same institution with the same structure.
+
+#### Acceptance Criteria
+
+1. WHEN a DiscoveredSchema is successfully produced, THE Schema_Cache SHALL store it keyed by Schema_Fingerprint (institution + document_type_label), scoped to the tenant
+2. WHEN Auto_Schema_Discovery is triggered, THE Schema_Cache SHALL be checked first — if a matching DiscoveredSchema exists for the tenant, the cached schema SHALL be used without making a VLM discovery call
+3. THE Schema_Cache SHALL store a created_at timestamp and a usage_count on each cached entry
+4. THE Schema_Cache SHALL support cache invalidation via a DELETE endpoint at /v1/tenants/{id}/schema-cache/{fingerprint}
+5. THE Pipeline SHALL log a structured `discovery.cache_hit` event when a cached schema is reused, and `discovery.cache_miss` event when a new discovery is performed
+6. THE Schema_Cache SHALL be tenant-isolated — no tenant can access or reuse another tenant's discovered schemas
+
+### Requirement 29: Auto-Discovery Output Format Compliance
+
+**User Story:** As a reconciliation operator, I want auto-discovered extraction results in the same output format as static extractors, so that downstream systems process all results uniformly regardless of how the schema was determined.
+
+#### Acceptance Criteria
+
+1. THE Dynamic_Extractor SHALL produce output in the same structure as static schema extractors: fields (with value, original_string, confidence, provenance), tables (with headers, rows, triangulation info), and abstentions
+2. THE Dynamic_Extractor SHALL set provenance source to "vlm" and extraction_rule to "discovered:{field_name}" for all extracted fields
+3. THE Dynamic_Extractor SHALL set schema_type in the extraction result to "discovered:{document_type_label}" (e.g., "discovered:futures_trade_confirmation")
+4. THE Dynamic_Extractor SHALL include a confidence score on every extracted field, derived from the VLM's stated confidence and the Verifier match score
+5. THE Packager SHALL handle schema_type values prefixed with "discovered:" and include the DiscoveredSchema definition in the output metadata
+6. THE Validator SHALL run applicable validators (date range, currency code, provenance integrity) on discovered-schema results — validators that require schema-specific knowledge (IBAN checksum, arithmetic balance) SHALL be skipped for discovered schemas
+
+### Requirement 30: Auto-Discovery Error Codes and Observability
+
+**User Story:** As a system operator, I want dedicated error codes and structured log events for the auto-discovery path, so that discovery failures are distinguishable from standard extraction failures in monitoring and alerting.
+
+#### Acceptance Criteria
+
+1. THE system SHALL define error codes ERR_DISCOVERY_001 (schema analysis failed), ERR_DISCOVERY_002 (dynamic extraction failed), and ERR_DISCOVERY_003 (cache lookup failed) in the central ErrorCode registry
+2. THE Pipeline SHALL emit structured log events: `discovery.triggered`, `discovery.schema_analysed`, `discovery.cache_hit`, `discovery.cache_miss`, `discovery.extraction_complete`, and `discovery.failed`
+3. THE `discovery.schema_analysed` log event SHALL include the discovered document_type_label, institution, number of fields identified, and number of tables identified
+4. THE `discovery.extraction_complete` log event SHALL include job_id, tenant_id, schema_type, fields_extracted count, fields_abstained count, and tables_extracted count
+5. WHEN Auto_Schema_Discovery fails at any stage, THE Pipeline SHALL produce an Abstention with the appropriate ERR_DISCOVERY_* code and a detail string describing the failure point
+6. THE usage events emitted during discovery SHALL set schema_type to "discovery" for cost attribution, distinguishing discovery token spend from standard extraction spend

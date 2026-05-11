@@ -125,3 +125,97 @@ class IngestionEvent:
     trace_id: str
     schema_type: str | None = None
     batch_id: str | None = None
+
+
+# ─── Auto-Schema Discovery Models ────────────────────────────────────────────
+
+
+@dataclass
+class SchemaFingerprint:
+    """Composite key for schema cache lookup.
+
+    Derived from institution name (normalised lowercase, stripped) and
+    document_type_label. Together these identify a unique document structure.
+    """
+
+    institution: str  # normalised: lowercase, stripped, spaces→underscores
+    document_type_label: str  # as returned by VLM (e.g., "futures_trade_confirmation")
+
+    @property
+    def key(self) -> str:
+        """String representation for DB storage and URL paths."""
+        inst = self.institution.lower().strip().replace(" ", "_")
+        return f"{inst}::{self.document_type_label}"
+
+    @classmethod
+    def from_key(cls, key: str) -> "SchemaFingerprint":
+        """Parse a fingerprint key string back into components."""
+        parts = key.split("::", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid fingerprint key: {key}")
+        return cls(institution=parts[0], document_type_label=parts[1])
+
+
+@dataclass
+class DiscoveredFieldDefinition:
+    """A single field definition discovered by VLM analysis."""
+
+    field_name: str  # snake_case identifier
+    description: str  # what the field contains
+    location_hint: str  # "header", "footer", "first_page", "last_page"
+
+
+@dataclass
+class DiscoveredTableDefinition:
+    """A table structure discovered by VLM analysis."""
+
+    table_type: str  # e.g., "trades", "balance_summary"
+    expected_headers: list[str] = field(default_factory=list)  # column headers
+    data_pattern: str = ""  # description of row content
+    location_hint: str = ""  # "body_repeating", "last_page", "first_page"
+
+
+@dataclass
+class DiscoveredSchema:
+    """VLM-generated schema definition for an unrecognised document type.
+
+    Produced by Auto_Schema_Discovery and consumed by Dynamic_Extractor.
+    Cached in Schema_Cache keyed by SchemaFingerprint.
+    """
+
+    document_type_label: str  # e.g., "futures_trade_confirmation"
+    institution: str  # e.g., "Société Générale"
+    metadata_fields: list[DiscoveredFieldDefinition] = field(default_factory=list)
+    table_definitions: list[DiscoveredTableDefinition] = field(default_factory=list)
+    fingerprint: SchemaFingerprint = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.fingerprint = SchemaFingerprint(
+            institution=self.institution,
+            document_type_label=self.document_type_label,
+        )
+
+
+@dataclass
+class DiscoverySample:
+    """A subset of document pages sent to VLM for schema analysis.
+
+    Kept small to respect token budgets. Default: first 5 pages.
+    Adaptively reduced if estimated tokens exceed 80% of context window.
+    """
+
+    page_texts: list[str] = field(default_factory=list)  # text content of each sampled page
+    page_numbers: list[int] = field(default_factory=list)  # which pages were sampled (1-indexed)
+    estimated_tokens: int = 0  # token estimate for the combined sample
+
+    @property
+    def page_count(self) -> int:
+        return len(self.page_texts)
+
+    @property
+    def combined_text(self) -> str:
+        """Concatenate all page texts with page markers."""
+        parts = []
+        for num, text in zip(self.page_numbers, self.page_texts):
+            parts.append(f"--- PAGE {num} ---\n{text}")
+        return "\n\n".join(parts)

@@ -39,7 +39,8 @@ POST /v1/extract → Ingestion → Classifier → Extractor → Triangulation
 ### Prerequisites
 
 - Python 3.11+
-- Docker & Docker Compose
+- Tesseract OCR 5.x (`brew install tesseract` on macOS, `apt-get install tesseract-ocr` on Ubuntu)
+- Docker & Docker Compose (optional — for PostgreSQL and PaddleOCR)
 - AWS credentials (for Bedrock VLM fallback)
 
 ### Local Development

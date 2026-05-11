@@ -3,6 +3,9 @@
 Detects document schema type based on structural signals and routes
 to the appropriate extractor. Uses keyword density and structural
 patterns — no LLM involved.
+
+When schema is unknown and VLM is enabled, delegates to AutoSchemaDiscovery
+for dynamic schema detection and extraction.
 """
 
 from __future__ import annotations
@@ -11,11 +14,14 @@ import structlog
 
 from api.errors import ErrorCode
 from api.models.response import Abstention
+from api.models.tenant import TenantContext
 from pipeline.models import AssembledDocument
+from pipeline.ports import VLMClientPort, RedactorPort
 from pipeline.schemas.bank_statement import BankStatementExtractor
 from pipeline.schemas.base import BaseSchemaExtractor
 from pipeline.schemas.custody_statement import CustodyStatementExtractor
 from pipeline.schemas.swift_confirm import SwiftConfirmExtractor
+from pipeline.vlm.token_budget import TokenBudget
 
 logger = structlog.get_logger()
 
@@ -145,10 +151,13 @@ def route_and_extract(
     doc: AssembledDocument,
     schema_type_hint: str | None = None,
 ) -> tuple[str, dict]:
-    """Route to the appropriate extractor and extract fields.
+    """Route to the appropriate extractor and extract fields (sync path).
 
     If schema_type_hint is provided, uses it directly. Otherwise,
     detects the schema from structural signals.
+
+    This is the synchronous version that does not support auto-discovery.
+    Use route_and_extract_async for discovery support.
 
     Args:
         doc: The assembled document.
@@ -196,6 +205,100 @@ def route_and_extract(
         }
 
     result = extractor.extract(doc)
+    return schema_type, result
+
+
+async def route_and_extract_async(
+    doc: AssembledDocument,
+    schema_type_hint: str | None = None,
+    tenant: TenantContext | None = None,
+    vlm_client: VLMClientPort | None = None,
+    redactor: RedactorPort | None = None,
+    schema_cache: "SchemaCache | None" = None,
+    token_budget: TokenBudget | None = None,
+    trace_id: str = "",
+) -> tuple[str, dict]:
+    """Route to the appropriate extractor and extract fields.
+
+    Modified to support auto-schema discovery when schema is unknown
+    and tenant has VLM enabled.
+
+    Args:
+        doc: The assembled document.
+        schema_type_hint: Optional pre-determined schema type.
+        tenant: Tenant context (needed for discovery).
+        vlm_client: VLM client port (needed for discovery).
+        redactor: Redactor port (needed for discovery).
+        schema_cache: Schema cache instance (needed for discovery).
+        token_budget: Token budget tracker (needed for discovery).
+        trace_id: Request trace ID for logging.
+
+    Returns:
+        Tuple of (schema_type, extraction_result_dict).
+        If schema is unknown, returns an abstention result.
+    """
+    from pipeline.discovery.auto_discovery import AutoSchemaDiscovery
+    from pipeline.discovery.dynamic_extractor import DynamicExtractor
+    from pipeline.discovery.schema_cache import SchemaCache
+    from pipeline.models import DiscoveredSchema
+
+    # Determine schema type
+    if schema_type_hint and schema_type_hint != "unknown":
+        schema_type = schema_type_hint
+    else:
+        schema_type = detect_schema(doc)
+
+    # Handle unknown schema — try auto-discovery if VLM enabled
+    if schema_type == "unknown":
+        if tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
+            discovery = AutoSchemaDiscovery(vlm_client, redactor, schema_cache)
+            result = await discovery.discover(doc, tenant, token_budget, trace_id)
+
+            if isinstance(result, Abstention):
+                return "unknown", {
+                    "fields": {},
+                    "tables": [],
+                    "abstentions": [result],
+                }
+
+            # Discovery succeeded — extract using discovered schema
+            extractor = DynamicExtractor(vlm_client, redactor)
+            extraction_result = await extractor.extract(
+                doc, result, tenant, token_budget, trace_id
+            )
+            return extraction_result.get("schema_type", f"discovered:{result.document_type_label}"), extraction_result
+
+        # VLM not available — fall back to standard abstention
+        abstention = Abstention(
+            field=None,
+            table_id=None,
+            reason=ErrorCode.EXTRACTION_SCHEMA_UNKNOWN,
+            detail="Document structural signals do not match any known schema",
+            vlm_attempted=False,
+        )
+        return "unknown", {
+            "fields": {},
+            "tables": [],
+            "abstentions": [abstention],
+        }
+
+    # Known schema — use static extractor (unchanged)
+    extractor_instance = get_extractor(schema_type)
+    if extractor_instance is None:
+        abstention = Abstention(
+            field=None,
+            table_id=None,
+            reason=ErrorCode.EXTRACTION_SCHEMA_UNKNOWN,
+            detail=f"No extractor available for schema type '{schema_type}'",
+            vlm_attempted=False,
+        )
+        return "unknown", {
+            "fields": {},
+            "tables": [],
+            "abstentions": [abstention],
+        }
+
+    result = extractor_instance.extract(doc)
     return schema_type, result
 
 
