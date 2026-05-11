@@ -84,6 +84,17 @@ BANK_STATEMENT_NEGATIVE_KEYWORDS: list[str] = [
     "net liquidating",
     "contract description",
     "exchange delivery",
+    "settlement service",
+    "settlement summary",
+    "acquirer",
+    "issuer",
+    "visanet",
+    "mastercard",
+    "interchange",
+    "proc date",
+    "reporting for",
+    "trade settl",
+    "instruct a/c",
 ]
 
 CUSTODY_STATEMENT_NEGATIVE_KEYWORDS: list[str] = [
@@ -92,8 +103,20 @@ CUSTODY_STATEMENT_NEGATIVE_KEYWORDS: list[str] = [
     "trade confirmation",
 ]
 
+SWIFT_CONFIRM_NEGATIVE_KEYWORDS: list[str] = [
+    "visanet",
+    "mastercard",
+    "acquirer",
+    "issuer",
+    "settlement service",
+    "settlement summary",
+    "proc date",
+    "reporting for",
+    "interchange",
+]
+
 # Minimum keyword density threshold to classify
-MIN_DENSITY_THRESHOLD = 0.02  # At least 2% of words must be keywords
+MIN_DENSITY_THRESHOLD = 0.035  # At least 3.5% of words must be keywords
 
 # Confidence gap: winning schema must score at least this multiple of second-best
 CONFIDENCE_GAP_MULTIPLIER = 1.5
@@ -133,6 +156,7 @@ def detect_schema(doc: AssembledDocument) -> str:
     # Apply negative keyword penalties
     bank_score = _apply_negative_penalty(full_text, bank_score, BANK_STATEMENT_NEGATIVE_KEYWORDS)
     custody_score = _apply_negative_penalty(full_text, custody_score, CUSTODY_STATEMENT_NEGATIVE_KEYWORDS)
+    swift_score = _apply_negative_penalty(full_text, swift_score, SWIFT_CONFIRM_NEGATIVE_KEYWORDS)
 
     scores = {
         "swift_confirm": swift_score,
