@@ -39,6 +39,10 @@ from pipeline.alerts.notifier import NotificationDispatcher
 from pipeline.discovery.schema_cache import SchemaCache
 from pipeline.dedup_store import DedupStore
 
+# Self-healing feedback loops
+from pipeline.self_healing.schema_learner import SchemaLearner
+from pipeline.self_healing.pattern_miner import PatternMiner
+
 
 def _configure_structlog() -> None:
     """Configure structlog with JSON rendering for production use."""
@@ -111,6 +115,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Dedup Store (persistent SHA-256 dedup) ───────────────────────────────
     app.state.dedup_store = DedupStore()
 
+    # ── Self-Healing: Schema Learner + Pattern Miner ─────────────────────────
+    app.state.schema_learner = SchemaLearner(app.state.schema_cache, None)  # VLM client wired per-request
+    app.state.pattern_miner = PatternMiner()
+    await app.state.pattern_miner.start(interval_seconds=3600)
+
     # ── Alert Engine ─────────────────────────────────────────────────────────
     alert_engine = AlertEngine()
     notifier = NotificationDispatcher(
@@ -130,6 +139,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger = structlog.get_logger()
     logger.info("app.shutdown", draining=True)
+
+    # Stop pattern miner before draining requests
+    if hasattr(app.state, "pattern_miner") and app.state.pattern_miner is not None:
+        await app.state.pattern_miner.stop()
 
     # Stop alert engine before draining requests
     if hasattr(app.state, "alert_engine") and app.state.alert_engine is not None:

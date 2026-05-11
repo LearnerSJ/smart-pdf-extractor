@@ -68,3 +68,24 @@ async def invalidate_cached_schema(
         data={"fingerprint": fingerprint, "deleted": True},
         meta=ResponseMeta(request_id="", timestamp=datetime.now(timezone.utc).isoformat()),
     )
+
+
+@router.get("/v1/admin/improvement-suggestions")
+async def get_improvement_suggestions(
+    tenant: TenantContext = Depends(resolve_tenant),
+) -> APIResponse:
+    """Get auto-generated improvement suggestions from pattern mining."""
+    from api.main import app
+    pattern_miner = getattr(app.state, "pattern_miner", None)
+    schema_learner = getattr(app.state, "schema_learner", None)
+
+    suggestions = pattern_miner.get_suggestions() if pattern_miner else []
+    performance = schema_learner.get_performance_summary() if schema_learner else []
+
+    return APIResponse(
+        data={
+            "suggestions": suggestions,
+            "schema_performance": performance,
+        },
+        meta=ResponseMeta(request_id="", timestamp=datetime.now(timezone.utc).isoformat()),
+    )

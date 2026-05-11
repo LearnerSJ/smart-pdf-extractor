@@ -633,6 +633,64 @@ async def process_document(
         a for a in abstentions
         if a.field is None or a.field not in resolved_field_names
     ]
+
+    # ── Self-Healing: Check if retry is needed ───────────────────────────────
+    from pipeline.self_healing.diagnostic_retry import DiagnosticRetry
+
+    diagnostic = DiagnosticRetry(ports.vlm_client)
+    if await diagnostic.should_retry(fields, abstentions, schema_type):
+        # Build sample text for diagnosis
+        sample_for_diagnosis = "\n".join(all_page_texts[:3]) if all_page_texts else ""
+
+        diagnosis = await diagnostic.diagnose(
+            sample_text=sample_for_diagnosis,
+            schema_type=schema_type,
+            fields=fields,
+            abstentions=abstentions,
+            trace_id=trace_id,
+        )
+
+        strategy = diagnostic.get_retry_strategy(diagnosis)
+
+        if strategy == "auto_discovery" and schema_cache and tenant.vlm_enabled:
+            # Retry with auto-discovery (force unknown schema)
+            logger.info("self_healing.retrying_with_discovery", trace_id=trace_id, strategy=strategy)
+            from pipeline.discovery.auto_discovery import AutoSchemaDiscovery
+            from pipeline.discovery.dynamic_extractor import DynamicExtractor
+            from pipeline.vlm.token_budget import TokenBudget as _RetryBudget
+
+            retry_budget = _RetryBudget(
+                max_tokens=settings.vlm_max_tokens_per_job,
+                budget_exceeded_action=settings.vlm_budget_exceeded_action,
+            )
+            discovery = AutoSchemaDiscovery(ports.vlm_client, ports.redactor, schema_cache)
+            assembled_for_retry = assemble(page_outputs)
+            discovered = await discovery.discover(assembled_for_retry, tenant, retry_budget, trace_id)
+
+            if not isinstance(discovered, Abstention):
+                extractor = DynamicExtractor(ports.vlm_client, ports.redactor)
+                retry_result = await extractor.extract(
+                    assembled_for_retry, discovered, tenant, retry_budget, trace_id
+                )
+                # Replace results if retry produced better output
+                retry_fields = retry_result.get("fields", {})
+                retry_abstentions = retry_result.get("abstentions", [])
+                retry_field_count = len(retry_fields)
+                original_field_count = len(fields)
+
+                if retry_field_count > original_field_count:
+                    logger.info(
+                        "self_healing.retry_improved",
+                        trace_id=trace_id,
+                        original_fields=original_field_count,
+                        retry_fields=retry_field_count,
+                    )
+                    all_fields = retry_fields
+                    all_abstentions = retry_abstentions
+                    schema_type = retry_result.get("schema_type", schema_type)
+                    fields = all_fields
+                    abstentions = all_abstentions
+
     assembled_doc = assemble(page_outputs)  # Full doc assembly for validation
 
     # ── Stage 8: Validation ──────────────────────────────────────────────────

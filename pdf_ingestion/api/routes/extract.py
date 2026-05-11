@@ -220,6 +220,21 @@ async def _run_pipeline_background(
             output_dict = {"error": pipeline_result.error, "error_code": pipeline_result.error_code}
             status = "failed"
 
+        # ── Self-Healing: Record failures for pattern mining ─────────────────
+        from api.main import app as _app
+        pattern_miner = getattr(_app.state, "pattern_miner", None)
+
+        if pipeline_result.output and pattern_miner:
+            for abstention in pipeline_result.output.abstentions:
+                pattern_miner.record_failure(
+                    job_id=job_id,
+                    tenant_id=tenant.id,
+                    schema_type=pipeline_result.output.schema_type or "unknown",
+                    error_code=abstention.reason,
+                    field_name=abstention.field,
+                    institution=None,
+                )
+
         # Update job status
         completed_at = datetime.now(timezone.utc).isoformat()
         _JOBS[job_id]["status"] = status
