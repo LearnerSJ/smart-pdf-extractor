@@ -215,7 +215,19 @@ export default function JobQueueScreen() {
       </div>
 
       {loading ? (
-        <p style={styles.loading}>Loading jobs...</p>
+        <div style={styles.loadingBanner}>
+          <div style={styles.loadingSpinner}>⟳</div>
+          <div>
+            <div style={styles.loadingTitle}>
+              {highlightId ? "Processing your document..." : "Loading jobs..."}
+            </div>
+            <div style={styles.loadingDetail}>
+              {highlightId
+                ? "Your file has been uploaded. The extraction pipeline is starting."
+                : "Fetching job statuses from the server."}
+            </div>
+          </div>
+        </div>
       ) : filteredJobs.length === 0 ? (
         <div style={styles.empty}>
           <p>No jobs yet. Submit a PDF to get started.</p>
@@ -258,6 +270,31 @@ const styles = {
     color: "var(--color-text-muted)",
     textAlign: "center",
     padding: "var(--space-10)",
+  },
+  loadingBanner: {
+    display: "flex",
+    alignItems: "center",
+    gap: "var(--space-3)",
+    padding: "var(--space-5)",
+    backgroundColor: "rgba(52, 152, 219, 0.06)",
+    border: "1px solid var(--color-info)",
+    borderRadius: "var(--border-radius)",
+    marginBottom: "var(--space-4)",
+  },
+  loadingSpinner: {
+    fontSize: "28px",
+    animation: "spin 1s linear infinite",
+    color: "var(--color-info)",
+  },
+  loadingTitle: {
+    fontSize: "var(--text-md)",
+    fontWeight: 600,
+    color: "var(--color-text-primary)",
+  },
+  loadingDetail: {
+    fontSize: "var(--text-sm)",
+    color: "var(--color-text-secondary)",
+    marginTop: "2px",
   },
   empty: {
     textAlign: "center",
