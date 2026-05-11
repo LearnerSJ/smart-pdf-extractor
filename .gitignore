@@ -25,3 +25,6 @@ PDF/
 
 # Test script output
 test_all_pdfs.py
+
+# Runtime artifacts
+.dedup_cache.json

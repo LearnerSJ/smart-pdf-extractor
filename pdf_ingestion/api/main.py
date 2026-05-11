@@ -31,11 +31,13 @@ from api.routes.admin_users import router as admin_users_router
 from api.routes.admin_usage import router as admin_usage_router
 from api.routes.admin_logs import router as admin_logs_router
 from api.routes.admin_alerts import router as admin_alerts_router
+from api.routes.schema_cache import router as schema_cache_router
 
 # Alert engine and notification dispatcher
 from pipeline.alerts.engine import AlertEngine
 from pipeline.alerts.notifier import NotificationDispatcher
 from pipeline.discovery.schema_cache import SchemaCache
+from pipeline.dedup_store import DedupStore
 
 
 def _configure_structlog() -> None:
@@ -106,6 +108,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Schema Cache (auto-discovery) ────────────────────────────────────────
     app.state.schema_cache = SchemaCache()
 
+    # ── Dedup Store (persistent SHA-256 dedup) ───────────────────────────────
+    app.state.dedup_store = DedupStore()
+
     # ── Alert Engine ─────────────────────────────────────────────────────────
     alert_engine = AlertEngine()
     notifier = NotificationDispatcher(
@@ -173,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_usage_router)
     app.include_router(admin_logs_router)
     app.include_router(admin_alerts_router)
+    app.include_router(schema_cache_router)
 
     return app
 

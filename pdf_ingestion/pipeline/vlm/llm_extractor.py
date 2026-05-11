@@ -19,6 +19,7 @@ import structlog
 from api.errors import ErrorCode
 from pipeline.models import VLMFieldResult
 from pipeline.ports import VLMClientPort
+from pipeline.vlm.response_parser import strip_markdown_fences
 
 logger = structlog.get_logger()
 
@@ -181,6 +182,10 @@ async def extract_document_with_llm(
         if not merged:
             merged_tables.append(dict(tbl))
 
+    # Apply continuation table detection (merge tables with repeated headers across pages)
+    from pipeline.assembler import merge_continuation_tables
+    merged_tables = merge_continuation_tables(merged_tables)
+
     # Attach tables to accounts
     accounts = metadata.get("accounts", [])
     if accounts:
@@ -247,7 +252,7 @@ async def _extract_metadata(
             "detail": "LLM returned null for metadata extraction",
         }
 
-    raw_value = _strip_markdown_fences(vlm_result.value)
+    raw_value = strip_markdown_fences(vlm_result.value)
 
     try:
         parsed = json.loads(raw_value)
@@ -307,7 +312,7 @@ async def _extract_transactions(
     if vlm_result.value is None:
         return {"transactions": [], "tables": []}
 
-    raw_value = _strip_markdown_fences(vlm_result.value)
+    raw_value = strip_markdown_fences(vlm_result.value)
 
     try:
         parsed = json.loads(raw_value)
@@ -331,33 +336,6 @@ async def _extract_transactions(
         "transactions": [],
         "tables": parsed.get("tables", []),
     }
-
-
-def _strip_markdown_fences(value: str) -> str:
-    """Remove ```json ... ``` wrapper from LLM response."""
-    raw = value.strip()
-    if raw.startswith("```"):
-        lines = raw.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        raw = "\n".join(lines)
-    # Strip any trailing text after the JSON object closes
-    # (LLM sometimes adds explanatory text after the JSON)
-    raw = raw.strip()
-    if raw.startswith("{"):
-        # Find the matching closing brace
-        depth = 0
-        for i, ch in enumerate(raw):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    raw = raw[:i + 1]
-                    break
-    return raw
 
 
 def _repair_truncated_json(raw: str) -> dict | None:

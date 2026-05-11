@@ -74,15 +74,38 @@ SWIFT_CONFIRM_KEYWORDS: list[str] = [
     "{4:",
 ]
 
+# ─── Negative Keywords (reduce false-positive matches) ────────────────────────
+
+BANK_STATEMENT_NEGATIVE_KEYWORDS: list[str] = [
+    "futures",
+    "derivative",
+    "margin requirement",
+    "open trade equity",
+    "net liquidating",
+    "contract description",
+    "exchange delivery",
+]
+
+CUSTODY_STATEMENT_NEGATIVE_KEYWORDS: list[str] = [
+    "futures",
+    "margin call",
+    "trade confirmation",
+]
+
 # Minimum keyword density threshold to classify
 MIN_DENSITY_THRESHOLD = 0.02  # At least 2% of words must be keywords
+
+# Confidence gap: winning schema must score at least this multiple of second-best
+CONFIDENCE_GAP_MULTIPLIER = 1.5
 
 
 def detect_schema(doc: AssembledDocument) -> str:
     """Detect the document schema type based on structural signals.
 
     Uses keyword density analysis and structural patterns (SWIFT tags,
-    page layout) to determine the document type.
+    page layout) to determine the document type. Applies negative keyword
+    penalties and requires a confidence gap between the best and second-best
+    scores to avoid false positives.
 
     Args:
         doc: The assembled document to classify.
@@ -107,6 +130,10 @@ def detect_schema(doc: AssembledDocument) -> str:
     bank_score = _compute_keyword_score(full_text, BANK_STATEMENT_KEYWORDS, word_count)
     custody_score = _compute_keyword_score(full_text, CUSTODY_STATEMENT_KEYWORDS, word_count)
 
+    # Apply negative keyword penalties
+    bank_score = _apply_negative_penalty(full_text, bank_score, BANK_STATEMENT_NEGATIVE_KEYWORDS)
+    custody_score = _apply_negative_penalty(full_text, custody_score, CUSTODY_STATEMENT_NEGATIVE_KEYWORDS)
+
     scores = {
         "swift_confirm": swift_score,
         "bank_statement": bank_score,
@@ -114,20 +141,35 @@ def detect_schema(doc: AssembledDocument) -> str:
     }
 
     # Select the highest scoring type
+    sorted_scores = sorted(scores.values(), reverse=True)
+    best_score = sorted_scores[0]
+    second_best_score = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
     best_type = max(scores, key=lambda k: scores[k])
-    best_score = scores[best_type]
 
     logger.info(
         "schema.detected",
         schema_type=best_type if best_score >= MIN_DENSITY_THRESHOLD else "unknown",
         scores=scores,
         word_count=word_count,
+        confidence_gap=best_score / second_best_score if second_best_score > 0 else float("inf"),
     )
 
-    if best_score >= MIN_DENSITY_THRESHOLD:
-        return best_type
+    # Check minimum density threshold
+    if best_score < MIN_DENSITY_THRESHOLD:
+        return "unknown"
 
-    return "unknown"
+    # Check confidence gap: best must be at least 1.5x the second-best
+    if second_best_score > 0 and best_score < CONFIDENCE_GAP_MULTIPLIER * second_best_score:
+        logger.info(
+            "schema.confidence_gap_insufficient",
+            best_type=best_type,
+            best_score=best_score,
+            second_best_score=second_best_score,
+            required_gap=CONFIDENCE_GAP_MULTIPLIER,
+        )
+        return "unknown"
+
+    return best_type
 
 
 def get_extractor(schema_type: str) -> BaseSchemaExtractor | None:
@@ -303,6 +345,20 @@ async def route_and_extract_async(
 
 
 # ─── Private Helpers ──────────────────────────────────────────────────────────
+
+
+def _apply_negative_penalty(
+    text: str, score: float, negative_keywords: list[str]
+) -> float:
+    """Apply negative keyword penalty to a schema score.
+
+    For each negative keyword found in the text, subtract 0.01 from the score.
+    Score is floored at 0.0.
+    """
+    for keyword in negative_keywords:
+        if keyword in text:
+            score -= 0.01
+    return max(score, 0.0)
 
 
 def _build_full_text(doc: AssembledDocument) -> str:

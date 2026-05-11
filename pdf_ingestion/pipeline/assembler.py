@@ -49,6 +49,9 @@ def assemble(page_outputs: list[PageOutput]) -> AssembledDocument:
     # Stitch multi-page tables
     stitched_tables = _stitch_multi_page_tables(all_tables)
 
+    # Merge continuation tables (repeated headers across pages)
+    stitched_tables = merge_continuation_tables(stitched_tables)
+
     provenance: dict[str, object] = {
         "total_pages": len(sorted_pages),
         "page_numbers": [p.page_number for p in sorted_pages],
@@ -303,3 +306,39 @@ def _get_page_range(
         pages.add(table2["page_number"])
 
     return sorted(pages)
+
+
+def merge_continuation_tables(tables: list[dict]) -> list[dict]:
+    """Merge tables that span multiple pages.
+
+    Detects continuation by checking if consecutive tables have identical
+    column headers. If so, merges their rows into a single table.
+
+    Args:
+        tables: List of table dicts with 'headers', 'rows', and optionally 'page_range'.
+
+    Returns:
+        Tables with continuations merged into single entries.
+    """
+    if not tables or len(tables) < 2:
+        return tables
+
+    merged = [tables[0]]
+    for table in tables[1:]:
+        prev = merged[-1]
+        # Check if headers match (continuation of same table)
+        if (table.get("headers") == prev.get("headers") and
+            table.get("headers") is not None and
+            len(table.get("headers", [])) > 0):
+            # Merge rows
+            prev_rows = prev.get("rows", [])
+            new_rows = table.get("rows", [])
+            prev["rows"] = prev_rows + new_rows
+            # Extend page range
+            prev_pages = prev.get("page_range", [])
+            new_pages = table.get("page_range", [])
+            prev["page_range"] = sorted(set(prev_pages + new_pages))
+        else:
+            merged.append(table)
+
+    return merged

@@ -24,6 +24,7 @@ from pipeline.models import (
     SchemaFingerprint,
 )
 from pipeline.ports import VLMClientPort, RedactorPort
+from pipeline.vlm.response_parser import strip_markdown_fences
 from pipeline.vlm.token_budget import TokenBudget
 
 logger = structlog.get_logger()
@@ -296,7 +297,7 @@ class AutoSchemaDiscovery:
             return None
 
         try:
-            data = json.loads(raw_response)
+            data = json.loads(strip_markdown_fences(raw_response))
         except (json.JSONDecodeError, TypeError):
             return None
 

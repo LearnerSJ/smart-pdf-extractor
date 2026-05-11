@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # AWS / Bedrock
     aws_region: str = "us-east-1"
     bedrock_model_id: str = "us.anthropic.claude-sonnet-4-6"
+    bedrock_fallback_model_id: str | None = None  # e.g., "us.anthropic.claude-haiku-4"
     vlm_confidence_threshold: float = 0.80
 
     # Triangulation thresholds
@@ -57,6 +58,9 @@ class Settings(BaseSettings):
     discovery_sample_pages: int = 5
     discovery_max_context_ratio: float = 0.80
     discovery_cache_enabled: bool = True
+
+    # OCR Processing
+    ocr_concurrency: int = 8
 
     model_config = {
         "env_file": ".env",

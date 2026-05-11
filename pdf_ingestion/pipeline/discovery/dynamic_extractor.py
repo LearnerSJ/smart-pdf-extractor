@@ -28,6 +28,7 @@ from pipeline.models import (
     VLMFieldResult,
 )
 from pipeline.ports import VLMClientPort, RedactorPort
+from pipeline.vlm.response_parser import strip_markdown_fences
 from pipeline.vlm.token_budget import TokenBudget
 from pipeline.vlm.verifier import verify_vlm_result
 
@@ -119,11 +120,28 @@ class DynamicExtractor:
             tables_extracted=len(tables),
         )
 
+        # Check if schema needs refinement (>50% abstention rate)
+        total_fields = len(schema.metadata_fields)
+        abstained_fields = len([a for a in abstentions if a.field is not None])
+        if total_fields > 0 and abstained_fields / total_fields > 0.5:
+            logger.warning(
+                "discovery.schema_needs_refinement",
+                trace_id=trace_id,
+                tenant_id=tenant.id,
+                schema_type=schema_type,
+                total_fields=total_fields,
+                abstained_fields=abstained_fields,
+                abstention_rate=abstained_fields / total_fields,
+            )
+
         return {
             "fields": fields,
             "tables": tables,
             "abstentions": abstentions,
             "schema_type": schema_type,
+            "needs_refinement": (
+                total_fields > 0 and abstained_fields / total_fields > 0.5
+            ),
         }
 
     async def _extract_fields(
@@ -358,7 +376,7 @@ DOCUMENT TEXT:
             return {}
 
         try:
-            data = json.loads(raw_response)
+            data = json.loads(strip_markdown_fences(raw_response))
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, TypeError):
@@ -375,7 +393,7 @@ DOCUMENT TEXT:
             return None
 
         try:
-            data = json.loads(raw_response)
+            data = json.loads(strip_markdown_fences(raw_response))
         except (json.JSONDecodeError, TypeError):
             return None
 

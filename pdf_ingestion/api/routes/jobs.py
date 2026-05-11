@@ -100,7 +100,8 @@ async def get_job_progress(
 ) -> dict:
     """Get real-time processing progress for a job.
 
-    Returns page counts, current stage, and estimated time remaining.
+    Returns page counts, current stage, estimated time remaining,
+    and partial extraction results (fields_extracted_so_far, latest_field).
     Does not require tenant ownership check for simplicity in demo mode.
     """
     progress = progress_store.get(job_id)
@@ -115,6 +116,9 @@ async def get_job_progress(
             "progress_percent": 0,
             "elapsed_seconds": 0,
             "estimated_remaining_seconds": None,
+            "fields_extracted_so_far": 0,
+            "tables_extracted_so_far": 0,
+            "latest_field": None,
         }
 
     return progress.to_dict()

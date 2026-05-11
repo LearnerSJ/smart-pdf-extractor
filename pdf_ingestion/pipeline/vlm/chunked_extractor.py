@@ -23,6 +23,7 @@ import structlog
 from api.errors import ErrorCode
 from pipeline.models import VLMFieldResult
 from pipeline.ports import VLMClientPort
+from pipeline.vlm.response_parser import strip_markdown_fences
 from pipeline.vlm.token_budget import TokenBudget
 from pipeline.vlm.usage_events import (
     VLMJobUsageSummary,
@@ -358,7 +359,7 @@ async def _extract_tier1(
 
         if vlm_result.value:
             try:
-                parsed = json.loads(vlm_result.value)
+                parsed = json.loads(strip_markdown_fences(vlm_result.value))
                 results.update(parsed)
             except (json.JSONDecodeError, TypeError):
                 logger.warning(
@@ -504,7 +505,7 @@ async def _process_window(
             return None
 
         try:
-            return json.loads(vlm_result.value)
+            return json.loads(strip_markdown_fences(vlm_result.value))
         except (json.JSONDecodeError, TypeError):
             logger.warning(
                 "vlm.window_failed",
@@ -759,7 +760,7 @@ async def _summarize_page(
             return page_index, {}
 
         try:
-            parsed = json.loads(vlm_result.value)
+            parsed = json.loads(strip_markdown_fences(vlm_result.value))
             return page_index, parsed
         except (json.JSONDecodeError, TypeError):
             return page_index, {}
@@ -942,7 +943,7 @@ async def _tier3_pass2_single(
         return {}
 
     try:
-        return json.loads(vlm_result.value)
+        return json.loads(strip_markdown_fences(vlm_result.value))
     except (json.JSONDecodeError, TypeError):
         logger.warning("vlm.window_failed", tier="tier3", pass_num=2, error="parse_error")
         return {}

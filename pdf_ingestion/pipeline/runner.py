@@ -241,7 +241,7 @@ async def process_document(
                 return page_num, page_output
 
             # Run OCR concurrently (limit concurrency to avoid overwhelming resources)
-            ocr_semaphore = asyncio.Semaphore(10)
+            ocr_semaphore = asyncio.Semaphore(settings.ocr_concurrency)
 
             async def _ocr_with_semaphore(page_num: int, page_image: bytes) -> tuple[int, PageOutput]:
                 async with ocr_semaphore:
@@ -370,6 +370,14 @@ async def process_document(
             "abstentions": section_abstentions,
         })
 
+        # Update progress with partial results from rule-based extraction
+        if progress and section_fields:
+            partial = {k: v.value for k, v in section_fields.items() if v.value is not None}
+            progress.update_partial_fields(partial)
+            progress.update_partial_tables(
+                progress.partial_tables_count + len(section_tables)
+            )
+
     # ── Phase 2: VLM fallback for all sections in parallel ────────────────────
     if progress:
         progress.current_stage = "vlm"
@@ -454,6 +462,12 @@ async def process_document(
         sd["fields"] = merged_fields
         sd["abstentions"] = new_abstentions
         sd["schema"] = section_schema
+
+        # Update progress store with partial results as fields are extracted
+        if progress:
+            partial = {k: v.value for k, v in merged_fields.items() if v.value is not None}
+            progress.update_partial_fields(partial)
+
         return sd
 
     # Run all VLM calls concurrently (with concurrency limit to avoid rate limiting)

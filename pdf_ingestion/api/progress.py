@@ -28,6 +28,10 @@ class JobProgress:
     vlm_total_windows: int = 0
     vlm_windows_complete: int = 0
 
+    # Partial results (streaming fields as they're extracted)
+    partial_fields: dict[str, object] = field(default_factory=dict)
+    partial_tables_count: int = 0
+
     # Internal timing
     _page_times: list[float] = field(default_factory=list, repr=False)
 
@@ -97,10 +101,22 @@ class JobProgress:
         if len(self._page_times) > 50:
             self._page_times = self._page_times[-50:]
 
+    def update_partial_fields(self, fields: dict[str, object]) -> None:
+        """Update partial fields as they are extracted during the pipeline run."""
+        self.partial_fields.update(fields)
+
+    def update_partial_tables(self, count: int) -> None:
+        """Update the count of tables extracted so far."""
+        self.partial_tables_count = count
+
     def to_dict(self) -> dict:
         """Serialize for API response."""
         elapsed = time.time() - self.started_at
         remaining = self.estimated_remaining_seconds
+
+        # Determine latest field name
+        field_names = list(self.partial_fields.keys())
+        latest_field = field_names[-1] if field_names else None
 
         return {
             "job_id": self.job_id,
@@ -113,6 +129,9 @@ class JobProgress:
             "estimated_remaining_seconds": round(remaining, 1) if remaining is not None else None,
             "vlm_windows_complete": self.vlm_windows_complete,
             "vlm_total_windows": self.vlm_total_windows,
+            "fields_extracted_so_far": len(self.partial_fields),
+            "tables_extracted_so_far": self.partial_tables_count,
+            "latest_field": latest_field,
         }
 
 

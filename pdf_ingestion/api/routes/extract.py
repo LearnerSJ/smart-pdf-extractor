@@ -85,6 +85,34 @@ async def submit_extraction(
         batch_id=batch_id,
     )
 
+    # Check dedup store for previously processed identical document
+    dedup_store = getattr(request.app.state, "dedup_store", None)
+    if dedup_store:
+        existing_job = dedup_store.lookup(doc_hash)
+        if existing_job:
+            logger.info(
+                "extraction.dedup_hit",
+                existing_job_id=existing_job,
+                doc_hash=doc_hash,
+                tenant_id=tenant.id,
+            )
+            return APIResponse[JobResponse](
+                data=JobResponse(
+                    job_id=existing_job,
+                    trace_id=trace_id,
+                    status="duplicate",
+                    result=None,
+                ),
+                meta=ResponseMeta(
+                    request_id=trace_id,
+                    timestamp=now.isoformat(),
+                ),
+            )
+
+    # Determine job priority based on file size
+    file_size = len(file_bytes)
+    priority = "high" if file_size < 1_000_000 else "normal"
+
     # Store job as processing
     _JOBS[job_id] = {
         "job_id": job_id,
@@ -95,9 +123,14 @@ async def submit_extraction(
         "schema_type": schema_type,
         "batch_id": batch_id,
         "status": "processing",
+        "priority": priority,
         "created_at": now.isoformat(),
         "completed_at": None,
     }
+
+    # Store hash in dedup store for future lookups
+    if dedup_store:
+        dedup_store.store(doc_hash, job_id)
 
     # Launch background processing
     import asyncio

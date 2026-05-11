@@ -72,11 +72,19 @@ class SchemaCache:
         schema: DiscoveredSchema,
         fingerprint: SchemaFingerprint,
         tenant_id: str,
+        needs_refinement: bool = False,
     ) -> None:
         """Store a discovered schema in the cache.
 
         Sets created_at to now, usage_count to 1.
         Overwrites if fingerprint already exists for this tenant.
+
+        Args:
+            schema: The discovered schema to cache.
+            fingerprint: Schema fingerprint for cache key.
+            tenant_id: Tenant isolation key.
+            needs_refinement: If True, flags the schema for review due to
+                high abstention rate (>50% of fields abstained).
         """
         cache_key = (tenant_id, fingerprint.key)
         now = datetime.now(timezone.utc)
@@ -90,6 +98,7 @@ class SchemaCache:
             "created_at": now,
             "updated_at": now,
             "usage_count": 1,
+            "needs_refinement": needs_refinement,
         }
 
         logger.info(
@@ -98,6 +107,7 @@ class SchemaCache:
             fingerprint=fingerprint.key,
             institution=schema.institution,
             document_type_label=schema.document_type_label,
+            needs_refinement=needs_refinement,
         )
 
     async def invalidate(
@@ -131,8 +141,40 @@ class SchemaCache:
                     "created_at": entry["created_at"].isoformat(),
                     "updated_at": entry["updated_at"].isoformat(),
                     "usage_count": entry["usage_count"],
+                    "needs_refinement": entry.get("needs_refinement", False),
                 })
         return results
+
+    async def mark_needs_refinement(
+        self,
+        fingerprint: SchemaFingerprint,
+        tenant_id: str,
+    ) -> bool:
+        """Flag a cached schema as needing refinement.
+
+        Called when extraction produces >50% abstentions, indicating
+        the discovered schema may not match the document well.
+
+        Returns True if the entry was found and updated.
+        """
+        cache_key = (tenant_id, fingerprint.key)
+        entry = self._store.get(cache_key)
+
+        if entry is None:
+            return False
+
+        entry["needs_refinement"] = True
+        entry["updated_at"] = datetime.now(timezone.utc)
+
+        logger.warning(
+            "schema_cache.marked_for_refinement",
+            tenant_id=tenant_id,
+            fingerprint=fingerprint.key,
+            institution=entry["institution"],
+            document_type_label=entry["document_type_label"],
+        )
+
+        return True
 
     @staticmethod
     def _serialize_schema(schema: DiscoveredSchema) -> dict:

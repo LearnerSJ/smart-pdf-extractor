@@ -701,6 +701,99 @@ def validate_totals_crosscheck(
     return failures
 
 
+def validate_multi_currency_balance(fields: dict, tables: list) -> list[dict]:
+    """Validate balance arithmetic for multi-currency statements.
+
+    Handles both single-currency (closing_balance is a number) and
+    multi-currency (closing_balance is a dict like {"USD": -1580776.21, "EUR": 130038.10}).
+
+    For single-currency: applies |closing - (opening + credits - debits)| <= 0.02.
+    For multi-currency: validates each currency independently where data is available.
+
+    Args:
+        fields: Extracted fields dict (raw values, not Field objects).
+        tables: List of extracted tables.
+
+    Returns:
+        List of failure dicts with keys: validator_name, field_name, error_code, detail.
+    """
+    failures: list[dict] = []
+    closing = fields.get("closing_balance", {})
+    opening = fields.get("opening_balance", {})
+
+    if isinstance(closing, dict) and isinstance(opening, dict):
+        # Multi-currency: validate each currency independently
+        for currency, close_val in closing.items():
+            open_val = opening.get(currency)
+            if open_val is not None and isinstance(close_val, (int, float)) and isinstance(open_val, (int, float)):
+                # Sum credits and debits for this currency from tables
+                total_credits = 0.0
+                total_debits = 0.0
+                for table in tables:
+                    if not isinstance(table, dict):
+                        continue
+                    table_currency = table.get("currency", "")
+                    if table_currency and table_currency != currency:
+                        continue
+                    for row in table.get("rows", []):
+                        if isinstance(row, dict):
+                            d = _to_float(row.get("debit")) or 0.0
+                            c = _to_float(row.get("credit")) or 0.0
+                            total_debits += d
+                            total_credits += c
+
+                # Only validate if we found transaction data for this currency
+                if total_credits > 0 or total_debits > 0:
+                    expected_closing = open_val + total_credits - total_debits
+                    diff = abs(close_val - expected_closing)
+                    if diff > 0.02:
+                        failures.append({
+                            "validator_name": "validate_multi_currency_balance",
+                            "field_name": f"closing_balance.{currency}",
+                            "error_code": "ERR_VAL_MULTI_CURRENCY_MISMATCH",
+                            "detail": (
+                                f"Currency {currency}: closing ({close_val}) != "
+                                f"opening ({open_val}) + credits ({total_credits}) "
+                                f"- debits ({total_debits}) = {expected_closing}. "
+                                f"Difference: {diff:.4f}"
+                            ),
+                        })
+    elif closing is not None and opening is not None:
+        # Single-currency: standard arithmetic check
+        close_val = _to_float(closing)
+        open_val = _to_float(opening)
+        if close_val is not None and open_val is not None:
+            total_credits = 0.0
+            total_debits = 0.0
+            for table in tables:
+                if not isinstance(table, dict):
+                    continue
+                for row in table.get("rows", []):
+                    if isinstance(row, dict):
+                        d = _to_float(row.get("debit")) or 0.0
+                        c = _to_float(row.get("credit")) or 0.0
+                        total_debits += d
+                        total_credits += c
+
+            if total_credits > 0 or total_debits > 0:
+                expected_closing = open_val + total_credits - total_debits
+                diff = abs(close_val - expected_closing)
+                if diff > 0.02:
+                    failures.append({
+                        "validator_name": "validate_multi_currency_balance",
+                        "field_name": "closing_balance",
+                        "error_code": "ERR_VAL_ARITHMETIC_MISMATCH",
+                        "detail": (
+                            f"Arithmetic mismatch: closing ({close_val}) != "
+                            f"opening ({open_val}) + credits ({total_credits}) "
+                            f"- debits ({total_debits}) = {expected_closing}. "
+                            f"Difference: {diff:.4f}"
+                        ),
+                    })
+
+    return failures
+
+
 # ─── Main Entry Point ─────────────────────────────────────────────────────────
 
 
