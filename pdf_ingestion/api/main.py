@@ -115,6 +115,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Dedup Store (persistent SHA-256 dedup) ───────────────────────────────
     app.state.dedup_store = DedupStore()
 
+    # ── PDF Store (in-memory for viewer) ─────────────────────────────────────
+    app.state.pdf_store = {}
+
     # ── Self-Healing: Schema Learner + Pattern Miner ─────────────────────────
     app.state.schema_learner = SchemaLearner(app.state.schema_cache, None)  # VLM client wired per-request
     app.state.pattern_miner = PatternMiner()

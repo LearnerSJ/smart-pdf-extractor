@@ -19,13 +19,16 @@ const DEFAULT_REDACTION_ENTITIES = [
   { type: "DATE_TIME", label: "Dates & Times", enabled: false },
 ];
 
+const MAX_CONCURRENT = 3;
+
 export default function JobSubmissionScreen() {
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [schemaType, setSchemaType] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState([]); // { file, status: 'pending'|'uploading'|'done'|'error', jobId?, error? }
   const [error, setError] = useState(null);
   const [showRedaction, setShowRedaction] = useState(false);
   const [redactionEntities, setRedactionEntities] = useState(DEFAULT_REDACTION_ENTITIES);
@@ -36,72 +39,106 @@ export default function JobSubmissionScreen() {
       return "Only PDF files are accepted";
     }
     if (f.size > 50 * 1024 * 1024) {
-      return "File exceeds maximum size of 50 MB";
+      return `File "${f.name}" exceeds maximum size of 50 MB`;
     }
     return null;
   };
 
-  const handleFileSelect = (f) => {
-    const err = validateFile(f);
-    if (err) {
-      setError(err);
-      setFile(null);
-    } else {
-      // Check for duplicate filename in existing jobs
-      const stored = JSON.parse(sessionStorage.getItem("pdf_jobs") || "[]");
-      if (stored.length > 0 && f) {
-        // We store filenames alongside job IDs for dedup check
-        const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
-        const existingJobId = Object.entries(jobFiles).find(([id, name]) => name === f.name)?.[0];
-        if (existingJobId) {
-          setError(`"${f.name}" has already been submitted. Check the Job Queue for existing results.`);
-          setFile(f); // Still allow override
-          return;
-        }
+  const handleFileSelect = (selectedFiles) => {
+    const fileList = Array.from(selectedFiles);
+    const validFiles = [];
+    const errors = [];
+
+    for (const f of fileList) {
+      const err = validateFile(f);
+      if (err) {
+        errors.push(err);
+      } else {
+        validFiles.push(f);
       }
-      setError(null);
-      setFile(f);
+    }
+
+    if (errors.length > 0 && validFiles.length === 0) {
+      setError(errors[0]);
+      setFiles([]);
+    } else {
+      if (errors.length > 0) {
+        setError(`${errors.length} file(s) skipped: ${errors[0]}`);
+      } else {
+        setError(null);
+      }
+      setFiles(validFiles);
     }
   };
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     setDragOver(false);
-    const dropped = e.dataTransfer.files[0];
-    handleFileSelect(dropped);
+    handleFileSelect(e.dataTransfer.files);
   }, []);
 
+  const uploadSingleFile = async (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (schemaType) formData.append("schema_type", schemaType);
+
+    const data = await apiPost("/v1/extract", formData, true);
+    return data;
+  };
+
   const handleSubmit = async () => {
-    if (!file) return;
+    if (files.length === 0) return;
     setUploading(true);
     setError(null);
 
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-      if (schemaType) formData.append("schema_type", schemaType);
+    const progress = files.map((f) => ({ file: f, status: "pending", jobId: null, error: null }));
+    setUploadProgress([...progress]);
 
-      const data = await apiPost("/v1/extract", formData, true);
+    // Upload with concurrency limit
+    let completed = 0;
+    const jobIds = [];
 
-      // Handle duplicate response
-      if (data.status === "duplicate") {
-        navigate(`/results/${data.job_id}`);
-        return;
+    const uploadNext = async (index) => {
+      if (index >= files.length) return;
+      progress[index].status = "uploading";
+      setUploadProgress([...progress]);
+
+      try {
+        const data = await uploadSingleFile(files[index]);
+        progress[index].status = "done";
+        progress[index].jobId = data.job_id;
+        jobIds.push(data.job_id);
+
+        // Store job in session
+        const stored = JSON.parse(sessionStorage.getItem("pdf_jobs") || "[]");
+        stored.unshift(data.job_id);
+        sessionStorage.setItem("pdf_jobs", JSON.stringify(stored));
+        const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
+        jobFiles[data.job_id] = files[index].name;
+        sessionStorage.setItem("pdf_job_files", JSON.stringify(jobFiles));
+      } catch (err) {
+        progress[index].status = "error";
+        progress[index].error = err.message;
       }
 
-      // Store job in session for the queue to pick up
-      const stored = JSON.parse(sessionStorage.getItem("pdf_jobs") || "[]");
-      stored.unshift(data.job_id);
-      sessionStorage.setItem("pdf_jobs", JSON.stringify(stored));
-      // Store filename for dedup check
-      const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
-      jobFiles[data.job_id] = file.name;
-      sessionStorage.setItem("pdf_job_files", JSON.stringify(jobFiles));
-      navigate(`/queue?highlight=${data.job_id}`);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setUploading(false);
+      completed++;
+      setUploadProgress([...progress]);
+    };
+
+    // Process in batches of MAX_CONCURRENT
+    for (let i = 0; i < files.length; i += MAX_CONCURRENT) {
+      const batch = [];
+      for (let j = i; j < Math.min(i + MAX_CONCURRENT, files.length); j++) {
+        batch.push(uploadNext(j));
+      }
+      await Promise.all(batch);
+    }
+
+    setUploading(false);
+
+    // Navigate to queue if at least one succeeded
+    if (jobIds.length > 0) {
+      navigate(`/queue?highlight=${jobIds[0]}`);
     }
   };
 
@@ -114,10 +151,25 @@ export default function JobSubmissionScreen() {
       {uploading && (
         <div style={styles.uploadBanner}>
           <div style={styles.uploadSpinner}>⟳</div>
-          <div>
-            <div style={styles.uploadBannerTitle}>Uploading {file?.name}...</div>
+          <div style={{ flex: 1 }}>
+            <div style={styles.uploadBannerTitle}>
+              Uploading {uploadProgress.filter(p => p.status === 'done').length}/{files.length} files...
+            </div>
             <div style={styles.uploadBannerDetail}>
-              {(file?.size / (1024 * 1024)).toFixed(1)} MB — Please wait while the file is sent to the server
+              {uploadProgress.filter(p => p.status === 'uploading').map(p => p.file.name).join(', ') || 'Preparing...'}
+            </div>
+            <div style={{ marginTop: '8px' }}>
+              {uploadProgress.map((p, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: 'var(--text-xs)', padding: '2px 0' }}>
+                  <span style={{ width: 16, textAlign: 'center' }}>
+                    {p.status === 'done' ? '✓' : p.status === 'error' ? '✕' : p.status === 'uploading' ? '⟳' : '·'}
+                  </span>
+                  <span style={{ color: p.status === 'error' ? 'var(--color-error)' : 'var(--color-text-secondary)' }}>
+                    {p.file.name}
+                  </span>
+                  {p.error && <span style={{ color: 'var(--color-error)' }}>— {p.error}</span>}
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -131,31 +183,61 @@ export default function JobSubmissionScreen() {
         onClick={() => fileInputRef.current?.click()}
         style={{
           ...styles.dropZone,
-          borderColor: dragOver ? "var(--color-info)" : file ? "var(--color-success)" : "var(--color-border)",
-          backgroundColor: dragOver ? "rgba(52, 152, 219, 0.04)" : file ? "rgba(46, 204, 113, 0.04)" : "transparent",
+          borderColor: dragOver ? "var(--color-info)" : files.length > 0 ? "var(--color-success)" : "var(--color-border)",
+          backgroundColor: dragOver ? "rgba(52, 152, 219, 0.04)" : files.length > 0 ? "rgba(46, 204, 113, 0.04)" : "transparent",
         }}
       >
         <input
           ref={fileInputRef}
           type="file"
           accept=".pdf,application/pdf"
-          onChange={(e) => handleFileSelect(e.target.files[0])}
+          multiple
+          onChange={(e) => handleFileSelect(e.target.files)}
           style={{ display: "none" }}
         />
-        {!file ? (
+        {files.length === 0 ? (
           <>
             <div style={styles.dropIcon}>↑</div>
-            <div style={styles.dropText}>Drop PDF here or click to browse</div>
-            <div style={styles.dropHint}>Max 50 MB · PDF only</div>
+            <div style={styles.dropText}>Drop PDF(s) here or click to browse</div>
+            <div style={styles.dropHint}>Max 50 MB per file · PDF only · Multiple files supported</div>
+          </>
+        ) : files.length === 1 ? (
+          <>
+            <div style={styles.dropIcon}>✓</div>
+            <div style={styles.dropText}>{files[0].name}</div>
+            <div style={styles.dropHint}>{(files[0].size / 1024).toFixed(0)} KB · Click to change</div>
           </>
         ) : (
           <>
             <div style={styles.dropIcon}>✓</div>
-            <div style={styles.dropText}>{file.name}</div>
-            <div style={styles.dropHint}>{(file.size / 1024).toFixed(0)} KB · Click to change</div>
+            <div style={styles.dropText}>{files.length} files selected</div>
+            <div style={styles.dropHint}>
+              {(files.reduce((s, f) => s + f.size, 0) / (1024 * 1024)).toFixed(1)} MB total · Click to change
+            </div>
           </>
         )}
       </div>
+
+      {/* File list when multiple */}
+      {files.length > 1 && (
+        <div style={styles.fileList}>
+          {files.map((f, i) => (
+            <div key={i} style={styles.fileListItem}>
+              <span style={styles.fileListName}>{f.name}</span>
+              <span style={styles.fileListSize}>{(f.size / 1024).toFixed(0)} KB</span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setFiles(files.filter((_, j) => j !== i));
+                }}
+                style={styles.fileListRemove}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Schema override */}
       <div style={styles.optionRow}>
@@ -172,7 +254,7 @@ export default function JobSubmissionScreen() {
       </div>
 
       {/* Redaction options (collapsible, shown after file selected) */}
-      {file && (
+      {files.length > 0 && (
         <div style={styles.redactionSection}>
           <button
             onClick={() => setShowRedaction(!showRedaction)}
@@ -223,10 +305,15 @@ export default function JobSubmissionScreen() {
       {/* Submit */}
       <button
         onClick={handleSubmit}
-        disabled={!file || uploading}
+        disabled={files.length === 0 || uploading}
         style={styles.submitBtn}
       >
-        {uploading ? "Uploading..." : "Submit for Extraction"}
+        {uploading
+          ? `Uploading ${uploadProgress.filter(p => p.status === 'done').length}/${files.length}...`
+          : files.length > 1
+            ? `Submit ${files.length} Files for Extraction`
+            : "Submit for Extraction"
+        }
       </button>
     </div>
   );
@@ -405,5 +492,44 @@ const styles = {
     fontSize: "var(--text-sm)",
     color: "var(--color-text-secondary)",
     marginTop: "2px",
+  },
+  fileList: {
+    width: "100%",
+    maxWidth: 600,
+    marginBottom: "var(--space-4)",
+    border: "1px solid var(--color-border-light)",
+    borderRadius: "var(--border-radius-sm)",
+    backgroundColor: "#fff",
+    maxHeight: 200,
+    overflowY: "auto",
+  },
+  fileListItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: "var(--space-2)",
+    padding: "var(--space-2) var(--space-3)",
+    borderBottom: "1px solid var(--color-border-light)",
+    fontSize: "var(--text-sm)",
+  },
+  fileListName: {
+    flex: 1,
+    color: "var(--color-text-primary)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  fileListSize: {
+    fontSize: "var(--text-xs)",
+    color: "var(--color-text-muted)",
+    flexShrink: 0,
+  },
+  fileListRemove: {
+    padding: "2px 6px",
+    border: "none",
+    backgroundColor: "transparent",
+    color: "var(--color-text-muted)",
+    cursor: "pointer",
+    fontSize: "var(--text-xs)",
+    borderRadius: "var(--border-radius-sm)",
   },
 };

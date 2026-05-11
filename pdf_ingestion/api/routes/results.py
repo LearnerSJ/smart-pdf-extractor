@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 
 from api.middleware.auth import resolve_tenant
 from api.models.response import APIResponse, ResponseMeta
@@ -74,3 +75,21 @@ async def get_result(
             timestamp=now.isoformat(),
         ),
     )
+
+
+@router.get("/v1/jobs/{job_id}/pdf")
+async def get_job_pdf(
+    job_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(resolve_tenant),
+) -> Response:
+    """Return the original PDF file for a job (for viewer).
+
+    Retrieves stored PDF bytes from app.state.pdf_store.
+    In production this would be S3/blob storage.
+    """
+    pdf_store = getattr(request.app.state, "pdf_store", {})
+    pdf_bytes = pdf_store.get(job_id)
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    return Response(content=pdf_bytes, media_type="application/pdf")

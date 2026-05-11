@@ -4,8 +4,10 @@ import { NavLink, useLocation } from "react-router-dom";
 const NAV_ITEMS = [
   { label: "Submit Job", path: "/submit" },
   { label: "Job Queue", path: "/queue" },
+  { label: "Compare", path: "/compare" },
   { label: "Feedback", path: "/feedback" },
-  { label: "Integration", path: "/settings/delivery" },
+  { label: "Integration", path: "/integration" },
+  { label: "Delivery", path: "/settings/delivery" },
   { label: "Redaction", path: "/settings/redaction" },
 ];
 

@@ -9,6 +9,8 @@ import ProvenanceTooltip from "../components/ProvenanceTooltip";
 import AbstentionRow from "../components/AbstentionRow";
 import CorrectionModal from "../components/CorrectionModal";
 import DataTable from "../components/DataTable";
+import PdfViewer from "../components/PdfViewer";
+import { exportToCSV, exportToExcel } from "../utils/exportData";
 
 const FINANCIAL_FIELDS = new Set(["iban", "isin", "bic", "swift_code", "account_number", "doc_id"]);
 
@@ -19,6 +21,8 @@ export default function ResultsViewerScreen() {
   const { data: jobData } = useApi(`/v1/jobs/${jobId}`);
   const [activeTab, setActiveTab] = useState("fields");
   const [correction, setCorrection] = useState(null);
+  const [showPdfViewer, setShowPdfViewer] = useState(false);
+  const [pdfHighlights, setPdfHighlights] = useState([]);
 
   // Get all jobs for prev/next navigation
   const allJobs = JSON.parse(sessionStorage.getItem("pdf_jobs") || "[]");
@@ -166,31 +170,69 @@ export default function ResultsViewerScreen() {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div style={styles.tabBar}>
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            style={{
-              ...styles.tab,
-              ...(activeTab === tab.id ? styles.tabActive : {}),
-            }}
-          >
-            {tab.label}
-            {tab.badge > 0 && <span style={styles.tabBadge}>{tab.badge}</span>}
-          </button>
-        ))}
+      {/* Export & View Source buttons */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', alignItems: 'center' }}>
+        <button onClick={() => exportToCSV(result, jobData?.filename?.replace('.pdf', '') || jobId)} style={styles.exportBtn}>
+          ↓ Export CSV
+        </button>
+        <button onClick={() => exportToExcel(result, jobData?.filename?.replace('.pdf', '') || jobId)} style={styles.exportBtn}>
+          ↓ Export Excel
+        </button>
+        <button
+          onClick={() => setShowPdfViewer(!showPdfViewer)}
+          style={{ ...styles.exportBtn, marginLeft: 'auto', backgroundColor: showPdfViewer ? 'var(--color-info)' : 'var(--color-surface)', color: showPdfViewer ? '#fff' : 'var(--color-text-primary)' }}
+        >
+          {showPdfViewer ? '✕ Close PDF' : '⊞ View Source PDF'}
+        </button>
       </div>
 
-      {/* Tab content */}
-      <div style={styles.tabContent}>
-        {activeTab === "fields" && (
-          <FieldsPanel fields={fields} onCorrect={(name, val) => setCorrection({ name, val })} />
+      {/* Split pane: PDF viewer + content */}
+      <div style={{ display: 'flex', gap: 'var(--space-4)' }}>
+        {showPdfViewer && (
+          <div style={{ flex: '0 0 50%', maxWidth: '50%', border: '1px solid var(--color-border-light)', borderRadius: 'var(--border-radius)', overflow: 'hidden' }}>
+            <PdfViewer
+              jobId={jobId}
+              highlights={pdfHighlights}
+            />
+          </div>
         )}
-        {activeTab === "tables" && <TablesPanel accounts={accounts} />}
-        {activeTab === "abstentions" && <AbstentionsPanel abstentions={abstentions} />}
-        {activeTab === "validation" && <ValidationPanel failures={valFailures} />}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {/* Tabs */}
+          <div style={styles.tabBar}>
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{
+                  ...styles.tab,
+                  ...(activeTab === tab.id ? styles.tabActive : {}),
+                }}
+              >
+                {tab.label}
+                {tab.badge > 0 && <span style={styles.tabBadge}>{tab.badge}</span>}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          <div style={styles.tabContent}>
+            {activeTab === "fields" && (
+              <FieldsPanel
+                fields={fields}
+                onCorrect={(name, val) => setCorrection({ name, val })}
+                onViewSource={(name, field) => {
+                  if (field?.provenance?.bbox) {
+                    setPdfHighlights([{ fieldName: name, ...field.provenance.bbox }]);
+                    setShowPdfViewer(true);
+                  }
+                }}
+              />
+            )}
+            {activeTab === "tables" && <TablesPanel accounts={accounts} />}
+            {activeTab === "abstentions" && <AbstentionsPanel abstentions={abstentions} />}
+            {activeTab === "validation" && <ValidationPanel failures={valFailures} />}
+          </div>
+        </div>
       </div>
 
       {/* Correction modal */}
@@ -208,7 +250,7 @@ export default function ResultsViewerScreen() {
   );
 }
 
-function FieldsPanel({ fields, onCorrect }) {
+function FieldsPanel({ fields, onCorrect, onViewSource }) {
   const entries = Object.entries(fields).filter(([k]) => k !== "accounts");
 
   if (entries.length === 0) return <div style={styles.emptyPanel}>No fields extracted.</div>;
@@ -216,13 +258,13 @@ function FieldsPanel({ fields, onCorrect }) {
   return (
     <div style={styles.fieldsGrid}>
       {entries.map(([name, field]) => (
-        <FieldRow key={name} name={name} field={field} onCorrect={onCorrect} />
+        <FieldRow key={name} name={name} field={field} onCorrect={onCorrect} onViewSource={onViewSource} />
       ))}
     </div>
   );
 }
 
-function FieldRow({ name, field, onCorrect }) {
+function FieldRow({ name, field, onCorrect, onViewSource }) {
   const [hovered, setHovered] = React.useState(false);
 
   return (
@@ -239,6 +281,15 @@ function FieldRow({ name, field, onCorrect }) {
           String(field?.value ?? "—")
         )}
       </div>
+      {field?.provenance?.bbox && (
+        <button
+          onClick={() => onViewSource && onViewSource(name, field)}
+          style={{ ...styles.viewSourceBtn, opacity: hovered ? 1 : 0 }}
+          title="View in PDF"
+        >
+          ⊞
+        </button>
+      )}
       <button
         onClick={() => onCorrect(name, field?.value)}
         style={{ ...styles.editBtn, opacity: hovered ? 1 : 0 }}
@@ -374,6 +425,8 @@ const styles = {
   vlmTag: { fontSize: "var(--text-xs)", color: "var(--color-info)", fontWeight: 600, backgroundColor: "rgba(52,152,219,0.1)", padding: "1px 4px", borderRadius: "3px" },
   provenanceHint: { fontSize: "var(--text-xs)", color: "var(--color-text-muted)", cursor: "help" },
   editBtn: { padding: "2px 8px", fontSize: "var(--text-xs)", color: "var(--color-info)", backgroundColor: "rgba(52,152,219,0.08)", border: "1px solid rgba(52,152,219,0.2)", borderRadius: "var(--border-radius-sm)", cursor: "pointer", transition: "opacity 150ms ease", fontWeight: 500, whiteSpace: "nowrap" },
+  exportBtn: { padding: '6px 12px', fontSize: 'var(--text-sm)', backgroundColor: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 'var(--border-radius-sm)', cursor: 'pointer', fontWeight: 500 },
+  viewSourceBtn: { padding: "2px 8px", fontSize: "var(--text-xs)", color: "var(--color-text-muted)", backgroundColor: "transparent", border: "1px solid var(--color-border)", borderRadius: "var(--border-radius-sm)", cursor: "pointer", transition: "opacity 150ms ease", whiteSpace: "nowrap" },
   emptyPanel: { textAlign: "center", padding: "var(--space-8)", color: "var(--color-text-muted)" },
   successPanel: { textAlign: "center", padding: "var(--space-8)", color: "var(--color-success)", fontWeight: 600 },
   accountSection: { marginBottom: "var(--space-5)" },

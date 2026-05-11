@@ -132,6 +132,11 @@ async def submit_extraction(
     if dedup_store:
         dedup_store.store(doc_hash, job_id)
 
+    # Store PDF bytes for the viewer
+    pdf_store = getattr(request.app.state, "pdf_store", None)
+    if pdf_store is not None:
+        pdf_store[job_id] = file_bytes
+
     # Launch background processing
     import asyncio
     asyncio.create_task(_run_pipeline_background(
