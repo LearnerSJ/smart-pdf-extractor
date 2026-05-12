@@ -1,8 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 
-// Configure worker — use empty string to disable worker (simpler for dev)
-pdfjsLib.GlobalWorkerOptions.workerSrc = "";
+// Configure worker — point to the bundled worker from pdfjs-dist
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.mjs",
+  import.meta.url
+).toString();
 
 /**
  * PDF Viewer component using pdf.js.
