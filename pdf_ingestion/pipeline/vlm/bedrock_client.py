@@ -126,16 +126,31 @@ class BedrockVLMClient(VLMClientPort):
     def _get_client(self) -> Any:
         """Lazy-initialize the boto3 Bedrock runtime client."""
         if self._client is None:
+            import os
             from botocore.config import Config
-            self._client = boto3.client(
-                "bedrock-runtime",
-                region_name=self._region,
-                config=Config(
-                    read_timeout=300,  # 5 minutes for large extraction calls
-                    connect_timeout=10,
-                    retries={"max_attempts": 0},  # We handle retries ourselves
-                ),
-            )
+            
+            # Use AWS_PROFILE if set (for SSO login)
+            profile = os.environ.get("AWS_PROFILE")
+            if profile:
+                session = boto3.Session(profile_name=profile, region_name=self._region)
+                self._client = session.client(
+                    "bedrock-runtime",
+                    config=Config(
+                        read_timeout=300,
+                        connect_timeout=10,
+                        retries={"max_attempts": 0},
+                    ),
+                )
+            else:
+                self._client = boto3.client(
+                    "bedrock-runtime",
+                    region_name=self._region,
+                    config=Config(
+                        read_timeout=300,
+                        connect_timeout=10,
+                        retries={"max_attempts": 0},
+                    ),
+                )
         return self._client
 
     def estimate_tokens(self, text: str) -> int:
