@@ -415,6 +415,19 @@ async def process_document(
             abstentions=len(section_abstentions),
         )
 
+        # When rule-based extraction produced ZERO fields (100% abstention),
+        # the schema classification is likely wrong. Force to "unknown" so
+        # the VLM uses generic extraction instead of schema-specific prompts.
+        if len(section_fields) == 0 and section_abstentions and section_schema != "unknown":
+            logger.info(
+                "vlm.schema_override_to_unknown",
+                section_index=section_idx,
+                original_schema=section_schema,
+                reason="zero_fields_extracted",
+            )
+            section_schema = "unknown"
+            sd["schema"] = "unknown"
+
         # When schema is unknown, trigger full VLM extraction
         if section_schema == "unknown" and not any(a.field is not None for a in section_abstentions):
             from api.models.response import Abstention as AbstentionModel
