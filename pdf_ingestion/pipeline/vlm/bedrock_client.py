@@ -118,7 +118,7 @@ class BedrockVLMClient(VLMClientPort):
         self._model_id = model_id
         self._vlm_enabled = vlm_enabled
         self._circuit_breaker = CircuitBreaker(
-            failure_threshold=3,
+            failure_threshold=10,
             recovery_window_seconds=60.0,
         )
         self._client: Any = None
