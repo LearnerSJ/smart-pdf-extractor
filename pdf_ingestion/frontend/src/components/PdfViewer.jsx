@@ -1,31 +1,17 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import * as pdfjsLib from "pdfjs-dist";
+
+// Configure worker — use empty string to disable worker (simpler for dev)
+pdfjsLib.GlobalWorkerOptions.workerSrc = "";
 
 /**
  * PDF Viewer component using pdf.js.
  * Renders a PDF page on a canvas and draws highlight overlays for field bounding boxes.
- * Falls back gracefully if pdfjs-dist is not installed.
  *
  * Props:
  *   - jobId: string — job ID to fetch the PDF from /v1/jobs/{id}/pdf
  *   - highlights: Array<{ fieldName, page, x, y, width, height }> — bounding boxes to highlight
  */
-
-let pdfjsLib = null;
-let pdfjsLoadAttempted = false;
-let pdfjsLoadError = null;
-
-function loadPdfJs() {
-  if (pdfjsLoadAttempted) return Promise.resolve(pdfjsLib);
-  pdfjsLoadAttempted = true;
-  return import("pdfjs-dist").then((mod) => {
-    pdfjsLib = mod;
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "";
-    return pdfjsLib;
-  }).catch((err) => {
-    pdfjsLoadError = err;
-    return null;
-  });
-}
 
 const API_KEY = "demo-key";
 
@@ -39,23 +25,12 @@ export default function PdfViewer({ jobId, highlights = [] }) {
   const [error, setError] = useState(null);
   const [hoveredHighlight, setHoveredHighlight] = useState(null);
   const [scale, setScale] = useState(1.2);
-  const [pdfAvailable, setPdfAvailable] = useState(true);
 
-  // Load pdf.js and the PDF document
+  // Load the PDF document
   useEffect(() => {
     let cancelled = false;
 
     async function init() {
-      const lib = await loadPdfJs();
-      if (cancelled) return;
-
-      if (!lib) {
-        setError("PDF viewer requires pdfjs-dist. Run: npm install pdfjs-dist");
-        setLoading(false);
-        setPdfAvailable(false);
-        return;
-      }
-
       try {
         const res = await fetch(`/v1/jobs/${jobId}/pdf`, {
           headers: { Authorization: `Bearer ${API_KEY}` },
@@ -68,7 +43,7 @@ export default function PdfViewer({ jobId, highlights = [] }) {
         }
 
         const arrayBuffer = await res.arrayBuffer();
-        const doc = await lib.getDocument({ data: arrayBuffer }).promise;
+        const doc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         if (cancelled) return;
 
         setPdfDoc(doc);
@@ -121,19 +96,6 @@ export default function PdfViewer({ jobId, highlights = [] }) {
   useEffect(() => {
     renderPage();
   }, [renderPage]);
-
-  if (!pdfAvailable) {
-    return (
-      <div style={styles.fallback}>
-        <div style={styles.fallbackIcon}>📄</div>
-        <div style={styles.fallbackTitle}>PDF Viewer</div>
-        <div style={styles.fallbackMessage}>
-          PDF viewer requires <code>pdfjs-dist</code> to be installed.
-        </div>
-        <div style={styles.fallbackCode}>npm install pdfjs-dist</div>
-      </div>
-    );
-  }
 
   if (loading) {
     return (
