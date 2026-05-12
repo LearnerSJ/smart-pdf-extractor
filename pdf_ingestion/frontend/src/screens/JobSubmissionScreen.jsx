@@ -83,11 +83,28 @@ export default function JobSubmissionScreen() {
     if (schemaType) formData.append("schema_type", schemaType);
 
     const data = await apiPost("/v1/extract", formData, true);
+    
+    // Handle duplicate response from backend
+    if (data.status === "duplicate") {
+      return { ...data, isDuplicate: true };
+    }
     return data;
   };
 
   const handleSubmit = async () => {
     if (files.length === 0) return;
+    
+    // Check for filename duplicates in session (already submitted this session)
+    const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
+    const duplicateNames = files.filter(f => 
+      Object.values(jobFiles).includes(f.name)
+    );
+    if (duplicateNames.length > 0 && !window.confirm(
+      `"${duplicateNames.map(f => f.name).join('", "')}" already submitted this session. Upload again?`
+    )) {
+      return;
+    }
+    
     setUploading(true);
     setError(null);
 
@@ -105,9 +122,16 @@ export default function JobSubmissionScreen() {
 
       try {
         const data = await uploadSingleFile(files[index]);
-        progress[index].status = "done";
-        progress[index].jobId = data.job_id;
-        jobIds.push(data.job_id);
+        if (data.isDuplicate) {
+          progress[index].status = "done";
+          progress[index].jobId = data.job_id;
+          progress[index].duplicate = true;
+          jobIds.push(data.job_id);
+        } else {
+          progress[index].status = "done";
+          progress[index].jobId = data.job_id;
+          jobIds.push(data.job_id);
+        }
 
         // Store job in session
         const stored = JSON.parse(sessionStorage.getItem("pdf_jobs") || "[]");
@@ -162,10 +186,10 @@ export default function JobSubmissionScreen() {
               {uploadProgress.map((p, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: 'var(--text-xs)', padding: '2px 0' }}>
                   <span style={{ width: 16, textAlign: 'center' }}>
-                    {p.status === 'done' ? '✓' : p.status === 'error' ? '✕' : p.status === 'uploading' ? '⟳' : '·'}
+                    {p.status === 'done' ? (p.duplicate ? '⟲' : '✓') : p.status === 'error' ? '✕' : p.status === 'uploading' ? '⟳' : '·'}
                   </span>
-                  <span style={{ color: p.status === 'error' ? 'var(--color-error)' : 'var(--color-text-secondary)' }}>
-                    {p.file.name}
+                  <span style={{ color: p.status === 'error' ? 'var(--color-error)' : p.duplicate ? 'var(--color-warning)' : 'var(--color-text-secondary)' }}>
+                    {p.file.name} {p.duplicate ? '(already processed)' : ''}
                   </span>
                   {p.error && <span style={{ color: 'var(--color-error)' }}>— {p.error}</span>}
                 </div>
