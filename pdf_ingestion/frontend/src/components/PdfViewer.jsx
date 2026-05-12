@@ -17,22 +17,14 @@ let pdfjsLoadError = null;
 function loadPdfJs() {
   if (pdfjsLoadAttempted) return Promise.resolve(pdfjsLib);
   pdfjsLoadAttempted = true;
-  try {
-    // Use a variable to prevent Rollup from statically resolving the import.
-    // This allows the build to succeed even when pdfjs-dist is not installed.
-    const moduleName = ["pdfjs", "dist"].join("-");
-    return import(/* @vite-ignore */ moduleName).then((mod) => {
-      pdfjsLib = mod;
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "";
-      return pdfjsLib;
-    }).catch((err) => {
-      pdfjsLoadError = err;
-      return null;
-    });
-  } catch (err) {
+  return import("pdfjs-dist").then((mod) => {
+    pdfjsLib = mod;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "";
+    return pdfjsLib;
+  }).catch((err) => {
     pdfjsLoadError = err;
-    return Promise.resolve(null);
-  }
+    return null;
+  });
 }
 
 const API_KEY = "demo-key";
