@@ -94,17 +94,6 @@ export default function JobSubmissionScreen() {
   const handleSubmit = async () => {
     if (files.length === 0) return;
     
-    // Check for filename duplicates in session (already submitted this session)
-    const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
-    const duplicateNames = files.filter(f => 
-      Object.values(jobFiles).includes(f.name)
-    );
-    if (duplicateNames.length > 0 && !window.confirm(
-      `"${duplicateNames.map(f => f.name).join('", "')}" already submitted this session. Upload again?`
-    )) {
-      return;
-    }
-    
     setUploading(true);
     setError(null);
 
