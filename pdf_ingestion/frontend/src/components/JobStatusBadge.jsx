@@ -8,6 +8,8 @@ const STATUS_MAP = {
   abstained: { label: "Abstained", bg: "var(--color-warning)", color: "#fff" },
   partial: { label: "Partial", bg: "var(--color-warning)", color: "#fff" },
   cancelled: { label: "Cancelled", bg: "var(--color-slate-light)", color: "#fff" },
+  unavailable: { label: "Unavailable", bg: "var(--color-slate-light)", color: "#fff" },
+  duplicate: { label: "Duplicate", bg: "var(--color-warning)", color: "#fff" },
 };
 
 export default function JobStatusBadge({ status }) {

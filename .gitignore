@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+pdf_ingestion/.venv/
 *.egg-info/
 .pytest_cache/
 
@@ -9,22 +10,27 @@ __pycache__/
 node_modules/
 dist/
 
-# Environment
+# Environment (secrets)
 .env
 pdf_ingestion/.env
 
 # OS
 .DS_Store
+Thumbs.db
 
-# PDFs - all PDF files and the PDF folder
-*.pdf
+# PDFs - sample/test PDF files (not part of the codebase)
 PDF/
 
 # IDE
 .vscode/
+.idea/
 
 # Test script output
 test_all_pdfs.py
 
 # Runtime artifacts
 .dedup_cache.json
+
+# Build artifacts
+*.whl
+*.tar.gz

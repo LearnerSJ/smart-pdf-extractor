@@ -26,6 +26,11 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "anthropic.claude-3-haiku-20240307-v1:0": 200_000,
     "anthropic.claude-3-opus-20240229-v1:0": 200_000,
     "us.anthropic.claude-sonnet-4-6": 200_000,
+    "anthropic.claude-sonnet-4-6": 200_000,
+    "eu.anthropic.claude-sonnet-4-6": 200_000,
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
+    "eu.anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
+    "anthropic.claude-haiku-4-5-20251001-v1:0": 200_000,
 }
 
 # Model-specific characters-per-token ratios (calibrated empirically).
@@ -34,6 +39,11 @@ MODEL_CHARS_PER_TOKEN: dict[str, float] = {
     "anthropic.claude-3-haiku-20240307-v1:0": 3.5,
     "anthropic.claude-3-opus-20240229-v1:0": 3.5,
     "us.anthropic.claude-sonnet-4-6": 3.5,
+    "anthropic.claude-sonnet-4-6": 3.5,
+    "eu.anthropic.claude-sonnet-4-6": 3.5,
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": 3.5,
+    "eu.anthropic.claude-sonnet-4-5-20250929-v1:0": 3.5,
+    "anthropic.claude-haiku-4-5-20251001-v1:0": 3.5,
 }
 
 
@@ -117,41 +127,37 @@ class BedrockVLMClient(VLMClientPort):
         self._region = region
         self._model_id = model_id
         self._vlm_enabled = vlm_enabled
+        self._profile: str | None = None  # resolved from AWS_PROFILE env var at call time
         self._circuit_breaker = CircuitBreaker(
-            failure_threshold=10,
+            failure_threshold=3,
             recovery_window_seconds=60.0,
         )
         self._client: Any = None
 
     def _get_client(self) -> Any:
-        """Lazy-initialize the boto3 Bedrock runtime client."""
-        if self._client is None:
-            import os
-            from botocore.config import Config
-            
-            # Use AWS_PROFILE if set (for SSO login)
-            profile = os.environ.get("AWS_PROFILE")
-            if profile:
-                session = boto3.Session(profile_name=profile, region_name=self._region)
-                self._client = session.client(
-                    "bedrock-runtime",
-                    config=Config(
-                        read_timeout=300,
-                        connect_timeout=10,
-                        retries={"max_attempts": 0},
-                    ),
-                )
-            else:
-                self._client = boto3.client(
-                    "bedrock-runtime",
-                    region_name=self._region,
-                    config=Config(
-                        read_timeout=300,
-                        connect_timeout=10,
-                        retries={"max_attempts": 0},
-                    ),
-                )
-        return self._client
+        """Create a fresh boto3 Bedrock runtime client on each call.
+
+        SSO tokens expire after ~1 hour. Creating a fresh session each time
+        ensures boto3 always reads the latest cached SSO credentials from disk
+        rather than using a stale in-memory token.
+        """
+        import os
+        from botocore.config import Config
+
+        profile = os.environ.get("AWS_PROFILE") or self._profile
+        if profile:
+            session = boto3.Session(profile_name=profile, region_name=self._region)
+        else:
+            session = boto3.Session(region_name=self._region)
+
+        return session.client(
+            "bedrock-runtime",
+            config=Config(
+                read_timeout=300,
+                connect_timeout=10,
+                retries={"max_attempts": 0},
+            ),
+        )
 
     def estimate_tokens(self, text: str) -> int:
         """Estimate token count using model-specific chars-per-token ratio.
@@ -304,7 +310,13 @@ class BedrockVLMClient(VLMClientPort):
 
         # For full extraction, page_text IS the prompt (from llm_extractor.py)
         # For single-field extraction, we build a prompt around the page_text
-        if field_name in ("full_extraction", "metadata_extraction", "transaction_extraction", "chunked_extraction", "page_summary"):
+        if field_name in (
+            "full_extraction",
+            "metadata_extraction",
+            "transaction_extraction",
+            "chunked_extraction",
+            "page_summary",
+        ):
             prompt = page_text
         else:
             prompt = (
@@ -316,13 +328,13 @@ class BedrockVLMClient(VLMClientPort):
                 "- Extract ONLY what is explicitly present in the text. Do not infer or calculate.\n"
                 "- Return the value exactly as it appears in the text.\n"
                 "- If the field is not present, return null for value.\n\n"
-                'Respond with ONLY a JSON object:\n'
+                "Respond with ONLY a JSON object:\n"
                 '{"value": "<extracted value or null>", "confidence": <0.0 to 1.0>}'
             )
 
         # Use higher token limit for extraction calls (metadata is small, transactions need more)
         if field_name in ("full_extraction", "transaction_extraction", "chunked_extraction"):
-            max_tokens = 8192
+            max_tokens = 32768  # dense transaction tables with many rows need large output
         elif field_name in ("metadata_extraction", "page_summary"):
             max_tokens = 2048
         else:
@@ -372,7 +384,13 @@ class BedrockVLMClient(VLMClientPort):
 
         # For extraction calls, return the raw JSON text as the value
         # (llm_extractor.py will parse it)
-        if field_name in ("full_extraction", "metadata_extraction", "transaction_extraction", "chunked_extraction", "page_summary"):
+        if field_name in (
+            "full_extraction",
+            "metadata_extraction",
+            "transaction_extraction",
+            "chunked_extraction",
+            "page_summary",
+        ):
             return VLMFieldResult(
                 value=extracted_text if extracted_text else None,
                 confidence=0.9,

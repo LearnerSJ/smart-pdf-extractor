@@ -1,179 +1,168 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import * as pdfjsLib from "pdfjs-dist";
+import { clampPage } from "../utils/syncUtils";
 
-// Configure worker — point to the bundled worker from pdfjs-dist
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.mjs",
   import.meta.url
 ).toString();
 
-/**
- * PDF Viewer component using pdf.js.
- * Renders a PDF page on a canvas and draws highlight overlays for field bounding boxes.
- *
- * Props:
- *   - jobId: string — job ID to fetch the PDF from /v1/jobs/{id}/pdf
- *   - highlights: Array<{ fieldName, page, x, y, width, height }> — bounding boxes to highlight
- */
-
 const API_KEY = "demo-key";
 
-export default function PdfViewer({ jobId, highlights = [] }) {
+export default function PdfViewer({
+  jobId,
+  highlights = [],
+  currentPage,
+  onPageChange,
+  onTotalPages,
+}) {
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
+  const containerRef = useRef(null);
+  const renderTaskRef = useRef(null);
   const [pdfDoc, setPdfDoc] = useState(null);
-  const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [hoveredHighlight, setHoveredHighlight] = useState(null);
-  const [scale, setScale] = useState(1.2);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [zoomLevel, setZoomLevel] = useState(1.0); // 1.0 = fit width
 
-  // Load the PDF document
+  // Load PDF
   useEffect(() => {
     let cancelled = false;
-
     async function init() {
       try {
         const res = await fetch(`/v1/jobs/${jobId}/pdf`, {
           headers: { Authorization: `Bearer ${API_KEY}` },
         });
-
-        if (!res.ok) {
-          setError("PDF not available for this job");
-          setLoading(false);
-          return;
-        }
-
-        const arrayBuffer = await res.arrayBuffer();
-        const doc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        if (!res.ok) { setError("PDF not available"); setLoading(false); return; }
+        const buf = await res.arrayBuffer();
+        const doc = await pdfjsLib.getDocument({ data: buf }).promise;
         if (cancelled) return;
-
         setPdfDoc(doc);
         setTotalPages(doc.numPages);
+        if (onTotalPages) onTotalPages(doc.numPages);
         setLoading(false);
       } catch (err) {
-        if (!cancelled) {
-          setError(err.message || "Failed to load PDF");
-          setLoading(false);
-        }
+        if (!cancelled) { setError(err.message); setLoading(false); }
       }
     }
-
     init();
     return () => { cancelled = true; };
   }, [jobId]);
 
-  // Navigate to highlighted page when highlights change
+  // Observe container width
   useEffect(() => {
-    if (highlights.length > 0 && highlights[0].page) {
-      setCurrentPage(highlights[0].page);
-    }
-  }, [highlights]);
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        if (e.contentRect.width > 0) setContainerWidth(e.contentRect.width);
+      }
+    });
+    ro.observe(el);
+    // Measure immediately (ResizeObserver callback is async)
+    const w = el.getBoundingClientRect().width;
+    if (w > 0) setContainerWidth(w);
+    return () => ro.disconnect();
+  }, [loading]); // re-run when loading changes (container appears)
 
-  // Render the current page
+  // Render page
   const renderPage = useCallback(async () => {
-    if (!pdfDoc || !canvasRef.current) return;
+    if (!pdfDoc || !canvasRef.current || containerWidth === 0) {
+      // If container width not yet measured, try measuring directly
+      if (containerRef.current && containerWidth === 0) {
+        const w = containerRef.current.getBoundingClientRect().width;
+        if (w > 0) { setContainerWidth(w); return; }
+      }
+      return;
+    }
 
+    if (renderTaskRef.current) {
+      try { renderTaskRef.current.cancel(); } catch {}
+      renderTaskRef.current = null;
+    }
+
+    const safePage = clampPage(currentPage, totalPages);
     try {
-      const page = await pdfDoc.getPage(currentPage);
-      const viewport = page.getViewport({ scale });
+      const page = await pdfDoc.getPage(safePage);
       const canvas = canvasRef.current;
       const ctx = canvas.getContext("2d");
+
+      const natural = page.getViewport({ scale: 1 });
+      const fitScale = (containerWidth - 24) / natural.width;
+      const scale = fitScale * zoomLevel;
+      const viewport = page.getViewport({ scale });
 
       canvas.width = viewport.width;
       canvas.height = viewport.height;
 
-      await page.render({ canvasContext: ctx, viewport }).promise;
+      const task = page.render({ canvasContext: ctx, viewport });
+      renderTaskRef.current = task;
+      await task.promise;
+      renderTaskRef.current = null;
 
-      // Draw highlights
       if (overlayRef.current) {
         overlayRef.current.style.width = `${viewport.width}px`;
         overlayRef.current.style.height = `${viewport.height}px`;
       }
     } catch (err) {
-      console.error("Error rendering PDF page:", err);
+      if (err?.name === "RenderingCancelledException") return;
+      if (err?.message?.includes("multiple render()")) return;
+      setError(err.message);
     }
-  }, [pdfDoc, currentPage, scale]);
+  }, [pdfDoc, currentPage, totalPages, containerWidth, zoomLevel]);
 
-  useEffect(() => {
-    renderPage();
-  }, [renderPage]);
+  useEffect(() => { renderPage(); }, [renderPage]);
 
-  if (loading) {
-    return (
-      <div style={styles.loading}>
-        <div style={styles.spinner}>⟳</div>
-        Loading PDF...
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={styles.errorPanel}>
-        <div style={styles.errorIcon}>⚠</div>
-        <div>{error}</div>
-      </div>
-    );
-  }
-
-  // Compute highlight rectangles for current page
-  const pageHighlights = highlights.filter(
-    (h) => !h.page || h.page === currentPage
+  if (loading) return <div style={styles.center}>Loading PDF...</div>;
+  if (error) return (
+    <div style={styles.center}>
+      <span>⚠ {error}</span>
+      <button onClick={() => setError(null)} style={styles.btn}>Retry</button>
+    </div>
   );
 
+  const pageHighlights = highlights.filter((h) => !h.page || h.page === currentPage);
+  const zoomPct = Math.round(zoomLevel * 100);
+
   return (
-    <div style={styles.container}>
+    <div style={styles.root}>
       {/* Toolbar */}
       <div style={styles.toolbar}>
-        <button
-          onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
-          disabled={currentPage <= 1}
-          style={styles.toolBtn}
-        >
-          ←
-        </button>
-        <span style={styles.pageInfo}>
-          Page {currentPage} / {totalPages}
-        </span>
-        <button
-          onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
-          disabled={currentPage >= totalPages}
-          style={styles.toolBtn}
-        >
-          →
-        </button>
-        <span style={styles.separator}>|</span>
-        <button onClick={() => setScale(Math.max(0.5, scale - 0.2))} style={styles.toolBtn}>−</button>
-        <span style={styles.zoomInfo}>{Math.round(scale * 100)}%</span>
-        <button onClick={() => setScale(Math.min(3, scale + 0.2))} style={styles.toolBtn}>+</button>
+        <button onClick={() => onPageChange(currentPage - 1)} disabled={currentPage <= 1} style={styles.btn}>←</button>
+        <input
+          type="number" min={1} max={totalPages} value={currentPage}
+          onChange={(e) => { const v = parseInt(e.target.value, 10); if (!isNaN(v)) onPageChange(v); }}
+          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+          style={styles.pageInput}
+        />
+        <span style={styles.label}>/ {totalPages}</span>
+        <button onClick={() => onPageChange(currentPage + 1)} disabled={currentPage >= totalPages} style={styles.btn}>→</button>
+        <span style={styles.sep}>|</span>
+        <button onClick={() => setZoomLevel((z) => Math.max(0.5, z - 0.25))} style={styles.btn}>−</button>
+        <span style={styles.label}>{zoomPct}%</span>
+        <button onClick={() => setZoomLevel((z) => Math.min(3, z + 0.25))} style={styles.btn}>+</button>
+        <button onClick={() => setZoomLevel(1.0)} style={styles.btn} title="Fit width">⊡</button>
       </div>
 
-      {/* Canvas + overlay */}
-      <div style={styles.canvasWrapper}>
+      {/* Canvas area */}
+      <div ref={containerRef} style={styles.canvasArea}>
         <canvas ref={canvasRef} style={styles.canvas} />
         <div ref={overlayRef} style={styles.overlay}>
           {pageHighlights.map((h, i) => (
-            <div
-              key={i}
-              style={{
-                position: "absolute",
-                left: `${(h.x || 0) * 100}%`,
-                top: `${(h.y || 0) * 100}%`,
-                width: `${(h.width || 0.1) * 100}%`,
-                height: `${(h.height || 0.02) * 100}%`,
-                backgroundColor: "rgba(52, 152, 219, 0.2)",
-                border: "2px solid rgba(52, 152, 219, 0.8)",
-                borderRadius: "2px",
-                cursor: "pointer",
-              }}
+            <div key={i} style={{
+              position: "absolute",
+              left: `${(h.x || 0) * 100}%`, top: `${(h.y || 0) * 100}%`,
+              width: `${(h.width || 0.1) * 100}%`, height: `${(h.height || 0.02) * 100}%`,
+              backgroundColor: "rgba(52,152,219,0.2)", border: "2px solid rgba(52,152,219,0.8)",
+              borderRadius: "2px", cursor: "pointer",
+            }}
               onMouseEnter={() => setHoveredHighlight(h)}
               onMouseLeave={() => setHoveredHighlight(null)}
             >
-              {hoveredHighlight === h && (
-                <div style={styles.tooltip}>{h.fieldName}</div>
-              )}
+              {hoveredHighlight === h && <div style={styles.tooltip}>{h.fieldName}</div>}
             </div>
           ))}
         </div>
@@ -183,125 +172,15 @@ export default function PdfViewer({ jobId, highlights = [] }) {
 }
 
 const styles = {
-  container: {
-    display: "flex",
-    flexDirection: "column",
-    height: "100%",
-    minHeight: 400,
-    backgroundColor: "var(--color-surface, #f8f8f8)",
-  },
-  toolbar: {
-    display: "flex",
-    alignItems: "center",
-    gap: "var(--space-2, 8px)",
-    padding: "var(--space-2, 8px) var(--space-3, 12px)",
-    borderBottom: "1px solid var(--color-border-light, #eee)",
-    backgroundColor: "#fff",
-  },
-  toolBtn: {
-    padding: "4px 8px",
-    border: "1px solid var(--color-border, #ddd)",
-    borderRadius: "var(--border-radius-sm, 4px)",
-    backgroundColor: "transparent",
-    cursor: "pointer",
-    fontSize: "var(--text-sm, 13px)",
-  },
-  pageInfo: {
-    fontSize: "var(--text-sm, 13px)",
-    color: "var(--color-text-secondary, #666)",
-  },
-  zoomInfo: {
-    fontSize: "var(--text-xs, 11px)",
-    color: "var(--color-text-muted, #999)",
-    minWidth: 36,
-    textAlign: "center",
-  },
-  separator: {
-    color: "var(--color-border, #ddd)",
-    margin: "0 4px",
-  },
-  canvasWrapper: {
-    flex: 1,
-    overflow: "auto",
-    position: "relative",
-    display: "flex",
-    justifyContent: "center",
-    padding: "var(--space-3, 12px)",
-  },
-  canvas: {
-    boxShadow: "0 2px 8px rgba(0,0,0,0.1)",
-  },
-  overlay: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    pointerEvents: "none",
-  },
-  tooltip: {
-    position: "absolute",
-    top: "-24px",
-    left: 0,
-    backgroundColor: "var(--color-primary, #2c3e50)",
-    color: "#fff",
-    padding: "2px 6px",
-    borderRadius: "3px",
-    fontSize: "11px",
-    whiteSpace: "nowrap",
-    pointerEvents: "none",
-  },
-  loading: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "8px",
-    padding: "var(--space-8, 32px)",
-    color: "var(--color-text-muted, #999)",
-  },
-  spinner: {
-    animation: "spin 1s linear infinite",
-    fontSize: "20px",
-  },
-  errorPanel: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "var(--space-8, 32px)",
-    color: "var(--color-text-muted, #999)",
-    gap: "8px",
-  },
-  errorIcon: {
-    fontSize: "24px",
-    color: "var(--color-warning, #f39c12)",
-  },
-  fallback: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "var(--space-8, 32px)",
-    textAlign: "center",
-    gap: "8px",
-  },
-  fallbackIcon: {
-    fontSize: "32px",
-    opacity: 0.5,
-  },
-  fallbackTitle: {
-    fontSize: "var(--text-md, 14px)",
-    fontWeight: 600,
-    color: "var(--color-text-primary, #333)",
-  },
-  fallbackMessage: {
-    fontSize: "var(--text-sm, 13px)",
-    color: "var(--color-text-secondary, #666)",
-  },
-  fallbackCode: {
-    fontFamily: "var(--font-mono, monospace)",
-    fontSize: "var(--text-sm, 13px)",
-    backgroundColor: "rgba(0,0,0,0.05)",
-    padding: "4px 8px",
-    borderRadius: "4px",
-    marginTop: "4px",
-  },
+  root: { display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", backgroundColor: "#f8f8f8" },
+  toolbar: { display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: "1px solid #eee", backgroundColor: "#fff", flexShrink: 0 },
+  btn: { padding: "4px 8px", border: "1px solid #ddd", borderRadius: 4, background: "transparent", cursor: "pointer", fontSize: 13 },
+  label: { fontSize: 12, color: "#666" },
+  sep: { color: "#ddd", margin: "0 4px" },
+  pageInput: { width: 40, padding: "3px 4px", border: "1px solid #ddd", borderRadius: 4, fontSize: 13, textAlign: "center" },
+  canvasArea: { flex: 1, overflow: "auto", padding: 12, minHeight: 0 },
+  canvas: { display: "block", boxShadow: "0 2px 8px rgba(0,0,0,0.1)" },
+  overlay: { position: "absolute", top: 12, left: 12, pointerEvents: "none" },
+  tooltip: { position: "absolute", top: -24, left: 0, backgroundColor: "#2c3e50", color: "#fff", padding: "2px 6px", borderRadius: 3, fontSize: 11, whiteSpace: "nowrap", pointerEvents: "none" },
+  center: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 32, gap: 8, color: "#999" },
 };

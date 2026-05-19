@@ -54,6 +54,13 @@ class ErrorCode:
     DELIVERY_BATCH_NOT_FOUND: str = "ERR_DELIVERY_003"
 
     # ─── Discovery ────────────────────────────────────────────────────────────
+    DISCOVERY_FAILED: str = "ERR_DISCOVERY_001"
+    DISCOVERY_SAMPLE_FAILED: str = "ERR_DISCOVERY_002"
+    DISCOVERY_VLM_FAILED: str = "ERR_DISCOVERY_003"
+    DISCOVERY_PARSE_FAILED: str = "ERR_DISCOVERY_004"
+    DISCOVERY_CACHE_FAILED: str = "ERR_DISCOVERY_005"
+
+    # Aliases used by auto_discovery.py and dynamic_extractor.py
     DISCOVERY_SCHEMA_ANALYSIS_FAILED: str = "ERR_DISCOVERY_001"
     DISCOVERY_DYNAMIC_EXTRACTION_FAILED: str = "ERR_DISCOVERY_002"
     DISCOVERY_CACHE_LOOKUP_FAILED: str = "ERR_DISCOVERY_003"

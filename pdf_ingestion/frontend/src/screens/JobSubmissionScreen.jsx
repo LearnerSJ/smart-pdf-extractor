@@ -35,7 +35,11 @@ export default function JobSubmissionScreen() {
 
   const validateFile = (f) => {
     if (!f) return "Please select a PDF file";
-    if (f.type !== "application/pdf" && !f.name.toLowerCase().endsWith(".pdf")) {
+    const isPdf =
+      f.type === "application/pdf" ||
+      f.type === "application/x-pdf" ||
+      f.name.toLowerCase().endsWith(".pdf");
+    if (!isPdf) {
       return "Only PDF files are accepted";
     }
     if (f.size > 50 * 1024 * 1024) {
@@ -45,6 +49,7 @@ export default function JobSubmissionScreen() {
   };
 
   const handleFileSelect = (selectedFiles) => {
+    if (!selectedFiles || selectedFiles.length === 0) return;
     const fileList = Array.from(selectedFiles);
     const validFiles = [];
     const errors = [];
@@ -74,7 +79,9 @@ export default function JobSubmissionScreen() {
   const handleDrop = useCallback((e) => {
     e.preventDefault();
     setDragOver(false);
-    handleFileSelect(e.dataTransfer.files);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFileSelect(e.dataTransfer.files);
+    }
   }, []);
 
   const uploadSingleFile = async (file) => {
@@ -86,7 +93,22 @@ export default function JobSubmissionScreen() {
     
     // Handle duplicate response from backend
     if (data.status === "duplicate") {
-      return { ...data, isDuplicate: true };
+      // Check if the original job still exists on the server
+      try {
+        const checkRes = await fetch(`/v1/jobs/${data.job_id}`, {
+          headers: { Authorization: `Bearer demo-key` },
+        });
+        if (checkRes.ok) {
+          return { ...data, isDuplicate: true };
+        }
+      } catch {}
+      // Original job no longer exists (server was restarted) — re-submit with force flag
+      const retryForm = new FormData();
+      retryForm.append("file", file);
+      if (schemaType) retryForm.append("schema_type", schemaType);
+      retryForm.append("force_reprocess", "true");
+      const retryData = await apiPost("/v1/extract", retryForm, true);
+      return retryData;
     }
     return data;
   };
@@ -152,6 +174,12 @@ export default function JobSubmissionScreen() {
     // Navigate to queue if at least one succeeded
     if (jobIds.length > 0) {
       navigate(`/queue?highlight=${jobIds[0]}`);
+    } else {
+      // All uploads failed — show the first error
+      const firstError = progress.find(p => p.error);
+      if (firstError) {
+        setError(firstError.error);
+      }
     }
   };
 
@@ -205,7 +233,16 @@ export default function JobSubmissionScreen() {
           type="file"
           accept=".pdf,application/pdf"
           multiple
-          onChange={(e) => handleFileSelect(e.target.files)}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            e.stopPropagation();
+            const selectedFiles = e.target.files;
+            if (selectedFiles && selectedFiles.length > 0) {
+              handleFileSelect(selectedFiles);
+            }
+            // Reset input value so the same file can be re-selected later
+            e.target.value = "";
+          }}
           style={{ display: "none" }}
         />
         {files.length === 0 ? (

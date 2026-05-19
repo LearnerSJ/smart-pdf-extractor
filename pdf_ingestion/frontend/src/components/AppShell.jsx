@@ -1,14 +1,13 @@
 import React from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 
 const NAV_ITEMS = [
-  { label: "Submit Job", path: "/submit" },
-  { label: "Job Queue", path: "/queue" },
-  { label: "Compare", path: "/compare" },
-  { label: "Feedback", path: "/feedback" },
-  { label: "Integration", path: "/integration" },
-  { label: "Delivery", path: "/settings/delivery" },
-  { label: "Redaction", path: "/settings/redaction" },
+  { label: "Submit Job",   path: "/submit" },
+  { label: "Job Queue",    path: "/queue" },
+  { label: "Feedback",     path: "/feedback" },
+  { label: "Integration",  path: "/integration" },
+  { label: "Delivery",     path: "/settings/delivery" },
+  { label: "Redaction",    path: "/settings/redaction" },
 ];
 
 export default function AppShell({ children }) {
@@ -16,26 +15,22 @@ export default function AppShell({ children }) {
     <div style={styles.container}>
       <aside style={styles.sidebar}>
         <div style={styles.brand}>
-          <div style={styles.brandTitle}>Smart PDF</div>
+          <div style={styles.brandTitle}>PDF Ingestion</div>
           <div style={styles.brandSubtitle}>Document extraction for reconciliation</div>
         </div>
         <nav style={styles.nav}>
-          {NAV_ITEMS.map((item, i) =>
-            item.divider ? (
-              <div key={i} style={styles.divider} />
-            ) : (
-              <NavLink
-                key={item.path}
-                to={item.path}
-                style={({ isActive }) => ({
-                  ...styles.navLink,
-                  ...(isActive ? styles.navLinkActive : {}),
-                })}
-              >
-                {item.label}
-              </NavLink>
-            )
-          )}
+          {NAV_ITEMS.map((item) => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              style={({ isActive }) => ({
+                ...styles.navLink,
+                ...(isActive ? styles.navLinkActive : {}),
+              })}
+            >
+              {item.label}
+            </NavLink>
+          ))}
         </nav>
       </aside>
       <main style={styles.main}>{children}</main>
@@ -91,20 +86,12 @@ const styles = {
     backgroundColor: "rgba(255,255,255,0.08)",
     fontWeight: 600,
   },
-  navIcon: {
-    width: "20px",
-    textAlign: "center",
-    fontSize: "var(--text-md)",
-  },
-  divider: {
-    height: "1px",
-    backgroundColor: "rgba(255,255,255,0.1)",
-    margin: "var(--space-2) var(--space-4)",
-  },
   main: {
     marginLeft: "var(--sidebar-width)",
     flex: 1,
     padding: "var(--space-6)",
     minHeight: "100vh",
+    overflowX: "hidden",
+    maxWidth: "calc(100vw - var(--sidebar-width))",
   },
 };

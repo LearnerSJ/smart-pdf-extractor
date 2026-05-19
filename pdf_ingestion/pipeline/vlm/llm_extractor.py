@@ -26,7 +26,7 @@ logger = structlog.get_logger()
 
 # ─── Phase 1: Metadata Extraction Prompt ──────────────────────────────────────
 
-METADATA_PROMPT = '''You are a financial document parser. Analyze the following document text and extract ONLY the metadata and account structure (NO transactions or table rows).
+METADATA_PROMPT = """You are a financial document parser. Analyze the following document text and extract ONLY the metadata and account structure (NO transactions or table rows).
 
 Document text:
 ---
@@ -61,12 +61,12 @@ Rules:
 - IMPORTANT: If a single statement has sub-sections or sub-accounts (e.g. "Settlement Account", "Margin Account", "ETD Account") that are all part of the same client's statement, treat the ENTIRE statement as ONE account. The sub-sections are categories within that account, not separate accounts.
 - Only create multiple accounts if the document explicitly contains statements for DIFFERENT account holders or DIFFERENT account numbers that are clearly independent.
 
-Respond with ONLY valid JSON, no other text.'''
+Respond with ONLY valid JSON, no other text."""
 
 
 # ─── Phase 2: Transaction Extraction Prompt ───────────────────────────────────
 
-TRANSACTIONS_PROMPT = '''You are a financial document parser. Extract ALL tabular data from this document section exactly as it appears.
+TRANSACTIONS_PROMPT = """You are a financial document parser. Extract ALL tabular data from this document section exactly as it appears.
 
 Document text (pages {start_page}-{end_page}):
 ---
@@ -89,7 +89,7 @@ Rules:
 - If multiple tables with different structures exist on these pages, return each as a separate entry in the array
 - If no tables found, return {{"tables": []}}
 
-Respond with ONLY valid JSON, no other text.'''
+Respond with ONLY valid JSON, no other text."""
 
 
 async def extract_document_with_llm(
@@ -135,33 +135,77 @@ async def extract_document_with_llm(
         pages = [document_text]
 
     # Process pages in adaptive windows
-    # Small docs (< 20 pages): 3 pages per window (detailed extraction)
-    # Large docs (>= 20 pages): 5 pages per window (balance between calls and timeout)
-    if len(pages) >= 20:
-        window_size = 5
-    else:
-        window_size = 3
+    # Key constraint: output token limit. Dense financial tables can have 50+ rows
+    # per page. Keep windows small (3 pages) to stay within output token limits.
+    window_size = 3
     windows: list[tuple[int, int, str]] = []
     for i in range(0, len(pages), window_size):
-        window_pages = pages[i:i + window_size]
+        window_pages = pages[i : i + window_size]
         window_text = "\n\n".join(window_pages)
         windows.append((i + 1, min(i + window_size, len(pages)), window_text))
 
-    # Run transaction extraction in parallel
-    txn_tasks = [
-        _extract_transactions(start, end, text, vlm_client, schema_type_hint)
-        for start, end, text in windows
-    ]
+    # Run transaction extraction in parallel with concurrency limit
+    # to avoid overwhelming Bedrock rate limits
+    _txn_semaphore = asyncio.Semaphore(8)
+
+    async def _bounded_extract_txn(start: int, end: int, text: str) -> dict:
+        async with _txn_semaphore:
+            result = await _extract_transactions(start, end, text, vlm_client, schema_type_hint)
+            tables_count = len(result.get("tables", []))
+            rows_count = sum(len(t.get("rows", [])) for t in result.get("tables", []))
+            logger.info(
+                "llm_extractor.window_complete",
+                start_page=start,
+                end_page=end,
+                tables_found=tables_count,
+                rows_found=rows_count,
+            )
+            return result
+
+    txn_tasks = [_bounded_extract_txn(start, end, text) for start, end, text in windows]
     txn_results = await asyncio.gather(*txn_tasks)
+
+    # Log summary of all windows
+    total_window_tables = sum(len(r.get("tables", [])) for r in txn_results if r)
+    empty_windows = sum(1 for r in txn_results if not r or not r.get("tables"))
+    logger.info(
+        "llm_extractor.all_windows_complete",
+        total_windows=len(windows),
+        total_tables=total_window_tables,
+        empty_windows=empty_windows,
+        window_ranges=[(s, e) for s, e, _ in windows],
+    )
 
     # ── Assemble: merge tables into accounts ────────────────────────────────
     all_tables: list[dict] = []
 
     for result in txn_results:
         if result and not result.get("error"):
-            all_tables.extend(result.get("tables", []))
+            start_p = result.get("start_page", 1)
+            end_p = result.get("end_page", 1)
+            page_range = list(range(start_p, end_p + 1))
+            for tbl in result.get("tables", []):
+                if isinstance(tbl, dict):
+                    tbl_with_pages = dict(tbl)
+                    tbl_with_pages["page_range"] = page_range
+                    # Tag each row with its source page range for per-row filtering
+                    rows = tbl_with_pages.get("rows", [])
+                    tagged_rows = []
+                    for row in rows:
+                        if isinstance(row, dict):
+                            row_copy = dict(row)
+                            row_copy["_source_pages"] = page_range
+                            tagged_rows.append(row_copy)
+                        else:
+                            tagged_rows.append(row)
+                    tbl_with_pages["rows"] = tagged_rows
+                    all_tables.append(tbl_with_pages)
 
-    # Merge tables with identical headers (same schema from different windows)
+    # Merge tables with identical or near-identical headers (same schema from different windows)
+    # Normalize headers for comparison: lowercase, strip whitespace
+    def _normalize_headers(headers: list) -> list[str]:
+        return [str(h).strip().lower() for h in headers if h]
+
     merged_tables: list[dict] = []
     for tbl in all_tables:
         if not isinstance(tbl, dict):
@@ -169,13 +213,19 @@ async def extract_document_with_llm(
         headers = tbl.get("headers", [])
         rows = tbl.get("rows", [])
         table_type = tbl.get("table_type", "")
+        norm_headers = _normalize_headers(headers)
 
-        # Find existing table with same headers
+        # Find existing table with same normalized headers
         merged = False
         for existing in merged_tables:
-            if existing.get("headers") == headers:
+            existing_norm = _normalize_headers(existing.get("headers", []))
+            if existing_norm == norm_headers and len(norm_headers) > 0:
                 existing_rows = existing.get("rows", [])
                 existing["rows"] = existing_rows + rows
+                # Extend page_range to cover all merged windows
+                existing_pages = set(existing.get("page_range", []))
+                new_pages = set(tbl.get("page_range", []))
+                existing["page_range"] = sorted(existing_pages | new_pages)
                 merged = True
                 break
 
@@ -184,6 +234,7 @@ async def extract_document_with_llm(
 
     # Apply continuation table detection (merge tables with repeated headers across pages)
     from pipeline.assembler import merge_continuation_tables
+
     merged_tables = merge_continuation_tables(merged_tables)
 
     # Attach tables to accounts
@@ -204,6 +255,26 @@ async def extract_document_with_llm(
         for acct in accounts:
             acct.pop("has_transactions", None)
             acct.pop("has_other_tables", None)
+
+    elif merged_tables:
+        # No accounts were identified but tables were extracted.
+        # Create a synthetic account to hold the tables so they're not lost.
+        logger.info(
+            "llm_extractor.synthetic_account",
+            reason="no_accounts_from_metadata",
+            tables_count=len(merged_tables),
+        )
+        accounts = [
+            {
+                "account_number": metadata.get("account_number") or "unknown",
+                "iban": None,
+                "currency": None,
+                "account_type": "current",
+                "opening_balance": metadata.get("opening_balance"),
+                "closing_balance": metadata.get("closing_balance"),
+                "tables": merged_tables,
+            }
+        ]
 
     metadata["accounts"] = accounts
 
@@ -231,7 +302,9 @@ async def _extract_metadata(
     """
     # Truncate for large documents: first 5000 chars + last 3000 chars
     if len(document_text) > 15000:
-        truncated = document_text[:8000] + "\n\n[... middle pages omitted ...]\n\n" + document_text[-5000:]
+        truncated = (
+            document_text[:8000] + "\n\n[... middle pages omitted ...]\n\n" + document_text[-5000:]
+        )
     else:
         truncated = document_text
 
@@ -332,9 +405,20 @@ async def _extract_transactions(
     if "value" in parsed and isinstance(parsed["value"], dict):
         parsed = parsed["value"]
 
+    tables = parsed.get("tables", [])
+    if not tables:
+        logger.info(
+            "llm_extractor.txn_window_empty",
+            start_page=start_page,
+            end_page=end_page,
+            raw_keys=list(parsed.keys()) if isinstance(parsed, dict) else [],
+        )
+
     return {
         "transactions": [],
-        "tables": parsed.get("tables", []),
+        "tables": tables,
+        "start_page": start_page,
+        "end_page": end_page,
     }
 
 
@@ -353,7 +437,7 @@ def _repair_truncated_json(raw: str) -> dict | None:
 
     # Try progressively shorter substrings
     for trim in range(0, min(500, len(raw)), 10):
-        attempt = raw[:len(raw) - trim] if trim > 0 else raw
+        attempt = raw[: len(raw) - trim] if trim > 0 else raw
 
         # Count open/close brackets
         open_braces = attempt.count("{") - attempt.count("}")

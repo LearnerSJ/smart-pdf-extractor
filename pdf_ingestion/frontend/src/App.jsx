@@ -6,9 +6,8 @@ import JobQueueScreen from "./screens/JobQueueScreen";
 import ResultsViewerScreen from "./screens/ResultsViewerScreen";
 import FeedbackScreen from "./screens/FeedbackScreen";
 import IntegrationGuideScreen from "./screens/IntegrationGuideScreen";
-import ComparisonScreen from "./screens/ComparisonScreen";
 import DeliverySettings from "./DeliverySettings";
-import RedactionSettings from "../RedactionSettings";
+import RedactionSettings from "./RedactionSettings";
 
 export default function App() {
   return (
@@ -22,7 +21,6 @@ export default function App() {
           <Route path="/results" element={<Navigate to="/queue" replace />} />
           <Route path="/feedback" element={<FeedbackScreen />} />
           <Route path="/integration" element={<IntegrationGuideScreen />} />
-          <Route path="/compare" element={<ComparisonScreen />} />
           <Route path="/settings/delivery" element={<DeliverySettings />} />
           <Route path="/settings/redaction" element={<RedactionSettings tenantId="demo-tenant" apiBaseUrl="" />} />
         </Routes>

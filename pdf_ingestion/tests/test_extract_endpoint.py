@@ -46,7 +46,7 @@ def test_extract_returns_202_with_job_response(client):
     )
     assert response.status_code == 202
     body = response.json()
-    assert body["data"]["status"] == "submitted"
+    assert body["data"]["status"] == "processing"
     assert "job_id" in body["data"]
     assert "trace_id" in body["data"]
     assert body["meta"]["request_id"] == body["data"]["trace_id"]
@@ -64,7 +64,7 @@ def test_extract_with_batch_id(client):
     )
     assert response.status_code == 202
     body = response.json()
-    assert body["data"]["status"] == "submitted"
+    assert body["data"]["status"] == "processing"
 
 
 def test_extract_requires_auth(client):

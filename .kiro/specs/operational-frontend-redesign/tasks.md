@@ -88,10 +88,10 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Support optional `onRowClick` handler
     - _Requirements: 1.5, 3.1_
 
-- [ ] 3. Checkpoint - Ensure foundation and components work
+- [x] 3. Checkpoint - Ensure foundation and components work
   - Ensure all tests pass, ask the user if questions arise.
 
-- [-] 4. Job Submission Screen
+- [x] 4. Job Submission Screen
   - [x] 4.1 Implement JobSubmissionScreen
     - Create `src/screens/JobSubmissionScreen.jsx`
     - Implement drag-and-drop upload zone accepting PDF files only
@@ -105,14 +105,14 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - On error: display error code and message from API response
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9_
 
-  - [ ]* 4.2 Write unit tests for JobSubmissionScreen
+  - [x]* 4.2 Write unit tests for JobSubmissionScreen
     - Test file type validation rejects non-PDF
     - Test file size validation rejects >50 MB
     - Test submit button disabled during upload
     - Test successful submission navigates to queue
     - _Requirements: 2.3, 2.4, 2.8, 2.7_
 
-- [-] 5. Job Queue Screen
+- [x] 5. Job Queue Screen
   - [x] 5.1 Implement JobQueueScreen
     - Create `src/screens/JobQueueScreen.jsx`
     - Fetch job list from API and render in DataTable with columns: job_id (MonospaceField), schema_type (SchemaTypeTag), status (JobStatusBadge), pages, submitted_at, completed_at, overall_confidence (ConfidenceBadge)
@@ -123,7 +123,7 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Support `?highlight={job_id}` query param to highlight newly submitted job
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11_
 
-  - [ ]* 5.2 Write property test for AND-filter correctness
+  - [x]* 5.2 Write property test for AND-filter correctness
     - **Property 1: AND-filter correctness**
     - Extract `filterJobs(jobs, filters)` as a pure function
     - Use fast-check to generate random arrays of job objects and random filter combinations
@@ -131,14 +131,14 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Minimum 100 iterations
     - **Validates: Requirements 3.8**
 
-  - [ ]* 5.3 Write unit tests for JobQueueScreen
+  - [x]* 5.3 Write unit tests for JobQueueScreen
     - Test table renders all columns with correct components
     - Test filter application reduces visible rows
     - Test row click navigates to results
     - Test polling stops for terminal statuses
     - _Requirements: 3.1, 3.8, 3.9, 3.10_
 
-- [-] 6. Results Viewer Screen
+- [x] 6. Results Viewer Screen
   - [x] 6.1 Implement ResultsViewerScreen - header and metadata
     - Create `src/screens/ResultsViewerScreen.jsx`
     - Fetch result data from `/v1/results/{id}` and progress from `/v1/jobs/{id}/progress` (if processing)
@@ -147,7 +147,7 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Show progress indicator with stage and percentage when status is "processing"
     - _Requirements: 4.1, 4.2, 4.3, 4.4_
 
-  - [ ] 6.2 Implement Results Viewer - fields panel
+  - [x] 6.2 Implement Results Viewer - fields panel
     - Render fields panel listing all extracted fields with columns: field_name, value, confidence (ConfidenceBadge), vlm_used flag, provenance indicator
     - Render financial identifier fields (iban, isin, bic, swift_code, account_number, doc_hash) using MonospaceField
     - Show ProvenanceTooltip on hover over provenance indicator
@@ -155,26 +155,26 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Open CorrectionModal on field value click, pre-populated with current value
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5_
 
-  - [ ] 6.3 Implement Results Viewer - tables panel
+  - [x] 6.3 Implement Results Viewer - tables panel
     - Render tables panel listing all extracted tables with table_id, type, page_range
     - Render each table with column headers and row data in scrollable DataTable
     - Display triangulation metadata: score (ConfidenceBadge), verdict (colour-coded text), winning method
     - Highlight table header red for "hard_flag" verdict, amber for "soft_flag"
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
 
-  - [ ] 6.4 Implement Results Viewer - abstentions panel
+  - [x] 6.4 Implement Results Viewer - abstentions panel
     - Render abstentions panel listing all abstention entries using AbstentionRow component
     - Display success message "Full extraction — no abstentions" when array is empty
     - _Requirements: 7.1, 7.2, 7.3, 7.4_
 
-  - [ ] 6.5 Implement Results Viewer - validation checks tab
+  - [x] 6.5 Implement Results Viewer - validation checks tab
     - Render validation checks tab with pass/fail indicator
     - When all pass: display success indicator with summary message
     - When failures exist: group by validator_name, display each group with validator label, failure count, and individual failure details (field_name, error_code, detail)
     - Display total failure count as badge on tab header
     - _Requirements: 8.1, 8.2, 8.3, 8.4_
 
-  - [ ]* 6.6 Write property test for validation failure grouping integrity
+  - [x]* 6.6 Write property test for validation failure grouping integrity
     - **Property 4: Validation failure grouping integrity**
     - Extract `groupByValidator(failures)` as a pure function
     - Use fast-check to generate random arrays of failure objects with random validator_names
@@ -182,7 +182,7 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Minimum 100 iterations
     - **Validates: Requirements 8.3**
 
-  - [ ]* 6.7 Write property test for financial identifier monospace rendering
+  - [x]* 6.7 Write property test for financial identifier monospace rendering
     - **Property 6: Financial identifier monospace rendering**
     - Extract `isFinancialIdentifier(fieldName)` as a pure function
     - Use fast-check to generate random field names from known identifier set + random non-identifier names
@@ -190,11 +190,11 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Minimum 100 iterations
     - **Validates: Requirements 5.3**
 
-- [ ] 7. Checkpoint - Ensure screens render correctly
+- [x] 7. Checkpoint - Ensure screens render correctly
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 8. Feedback Screen
-  - [ ] 8.1 Implement FeedbackScreen
+- [x] 8. Feedback Screen
+  - [x] 8.1 Implement FeedbackScreen
     - Create `src/screens/FeedbackScreen.jsx`
     - Fetch feedback entries from API and render in DataTable with columns: job_id (MonospaceField), field_name, original_value, corrected_value, submitted_by, submitted_at
     - Implement filter controls for job_id and date range
@@ -202,7 +202,7 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Handle special characters in CSV (commas, double quotes, newlines, Unicode) with proper escaping
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
 
-  - [ ]* 8.2 Write property test for CSV export round-trip
+  - [x]* 8.2 Write property test for CSV export round-trip
     - **Property 3: CSV export round-trip**
     - Extract `exportCSV(entries)` and `parseCSV(csvString)` as pure functions
     - Use fast-check to generate random feedback entries with special characters (commas, double quotes, newlines, Unicode)
@@ -210,14 +210,14 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Minimum 100 iterations
     - **Validates: Requirements 9.4**
 
-  - [ ]* 8.3 Write unit tests for FeedbackScreen
+  - [x]* 8.3 Write unit tests for FeedbackScreen
     - Test table renders all columns
     - Test CSV export downloads file
     - Test filters reduce visible rows
     - _Requirements: 9.1, 9.4, 9.5_
 
-- [ ] 9. Property-based tests for reusable components
-  - [ ]* 9.1 Write property test for ConfidenceBadge colour threshold mapping
+- [x] 9. Property-based tests for reusable components
+  - [x]* 9.1 Write property test for ConfidenceBadge colour threshold mapping
     - **Property 2: ConfidenceBadge colour threshold mapping**
     - Extract `getConfidenceColour(value)` as a pure function
     - Use fast-check to generate random floats in [0, 1] with bias toward boundaries (0.70, 0.90)
@@ -225,7 +225,7 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Minimum 100 iterations
     - **Validates: Requirements 12.1**
 
-  - [ ]* 9.2 Write property test for CorrectionModal submit button enablement
+  - [x]* 9.2 Write property test for CorrectionModal submit button enablement
     - **Property 5: Correction submit button enablement**
     - Extract `isSubmitEnabled(value)` as a pure function
     - Use fast-check to generate random strings including whitespace-only, empty, and mixed content
@@ -233,22 +233,22 @@ Rebuild the operational frontend from a monolithic `PdfExtractor.jsx` into a mul
     - Minimum 100 iterations
     - **Validates: Requirements 10.5**
 
-- [ ] 10. Integration wiring and final polish
-  - [ ] 10.1 Wire all screens into App.jsx and verify navigation flows
+- [x] 10. Integration wiring and final polish
+  - [x] 10.1 Wire all screens into App.jsx and verify navigation flows
     - Ensure all route imports are correct and screens render within AppShell
     - Verify navigation between screens works (submit → queue → results → feedback)
     - Verify redirect from `/` to `/submit` and from `/results` (no id) to `/queue`
     - Verify existing DeliverySettings and RedactionSettings still mount correctly
     - _Requirements: 11.1, 11.2, 11.3, 11.4_
 
-  - [ ]* 10.2 Write integration tests for navigation flows
+  - [x]* 10.2 Write integration tests for navigation flows
     - Test navigation from submit to queue after job creation
     - Test navigation from queue row click to results
     - Test redirect from `/results` to `/queue`
     - Test active nav link highlighting
     - _Requirements: 11.1, 11.2, 11.3, 11.4_
 
-- [ ] 11. Final checkpoint - Ensure all tests pass
+- [x] 11. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

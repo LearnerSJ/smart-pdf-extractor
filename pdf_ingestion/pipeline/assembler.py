@@ -55,9 +55,7 @@ def assemble(page_outputs: list[PageOutput]) -> AssembledDocument:
     provenance: dict[str, object] = {
         "total_pages": len(sorted_pages),
         "page_numbers": [p.page_number for p in sorted_pages],
-        "classifications": {
-            p.page_number: p.classification for p in sorted_pages
-        },
+        "classifications": {p.page_number: p.classification for p in sorted_pages},
     }
 
     logger.info(
@@ -140,10 +138,17 @@ def _xy_cut_recursive(blocks: list[dict[str, object]]) -> list[dict[str, object]
             return _xy_cut_recursive(left_blocks) + _xy_cut_recursive(right_blocks)
 
     # Fallback: sort top-to-bottom, then left-to-right
-    return sorted(blocks, key=lambda b: (
-        float(b.get("bbox", [0, 0, 0, 0])[1]) if isinstance(b.get("bbox"), (list, tuple)) else 0,
-        float(b.get("bbox", [0, 0, 0, 0])[0]) if isinstance(b.get("bbox"), (list, tuple)) else 0,
-    ))
+    return sorted(
+        blocks,
+        key=lambda b: (
+            float(b.get("bbox", [0, 0, 0, 0])[1])
+            if isinstance(b.get("bbox"), (list, tuple))
+            else 0,
+            float(b.get("bbox", [0, 0, 0, 0])[0])
+            if isinstance(b.get("bbox"), (list, tuple))
+            else 0,
+        ),
+    )
 
 
 def _find_horizontal_split(
@@ -274,7 +279,11 @@ def _stitch_multi_page_tables(
                         "rows": merged_rows,
                         "page_range": _get_page_range(current, next_table),
                         "provenance": {
-                            **(current.get("provenance", {}) if isinstance(current.get("provenance"), dict) else {}),
+                            **(
+                                current.get("provenance", {})
+                                if isinstance(current.get("provenance"), dict)
+                                else {}
+                            ),
                             "multi_page": True,
                         },
                     }
@@ -287,9 +296,7 @@ def _stitch_multi_page_tables(
     return stitched
 
 
-def _get_page_range(
-    table1: dict[str, object], table2: dict[str, object]
-) -> list[int]:
+def _get_page_range(table1: dict[str, object], table2: dict[str, object]) -> list[int]:
     """Compute the page range for a stitched table."""
     pages: set[int] = set()
 
@@ -312,7 +319,8 @@ def merge_continuation_tables(tables: list[dict]) -> list[dict]:
     """Merge tables that span multiple pages.
 
     Detects continuation by checking if consecutive tables have identical
-    column headers. If so, merges their rows into a single table.
+    column headers (case-insensitive, whitespace-normalized). If so, merges
+    their rows into a single table.
 
     Args:
         tables: List of table dicts with 'headers', 'rows', and optionally 'page_range'.
@@ -323,13 +331,16 @@ def merge_continuation_tables(tables: list[dict]) -> list[dict]:
     if not tables or len(tables) < 2:
         return tables
 
+    def _norm(headers: list) -> list[str]:
+        return [str(h).strip().lower() for h in headers if h]
+
     merged = [tables[0]]
     for table in tables[1:]:
         prev = merged[-1]
         # Check if headers match (continuation of same table)
-        if (table.get("headers") == prev.get("headers") and
-            table.get("headers") is not None and
-            len(table.get("headers", [])) > 0):
+        prev_headers = prev.get("headers") or []
+        curr_headers = table.get("headers") or []
+        if _norm(curr_headers) == _norm(prev_headers) and len(curr_headers) > 0:
             # Merge rows
             prev_rows = prev.get("rows", [])
             new_rows = table.get("rows", [])

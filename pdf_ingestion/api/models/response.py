@@ -113,6 +113,38 @@ class FinalOutput(BaseModel):
     abstentions: list[Abstention]
     confidence_summary: ConfidenceSummary
     pipeline_version: str
+    llm_escalated: bool = False
+
+
+class ActionButton(BaseModel):
+    """A clickable action button returned by the chat endpoint."""
+
+    label: str
+    action: str  # "reextract_table" | "reextract_all" | "accept" | "ask_again"
+    table_id: str | None = None
+
+
+class ChatResponse(BaseModel):
+    """Response payload returned by POST /v1/jobs/{id}/chat."""
+
+    reply: str
+    action_buttons: list[ActionButton] | None = None
+    pending_schema_id: str | None = None
+
+
+class ReextractResponse(BaseModel):
+    """Response payload returned by POST /v1/jobs/{id}/reextract-table."""
+
+    tables: list[Table]
+    pending_schema_id: str
+    validation_warnings: list[str]
+
+
+class ApproveSchemaResponse(BaseModel):
+    """Response payload returned by POST /v1/jobs/{id}/approve-schema."""
+
+    approved: bool
+    fingerprint_key: str
 
 
 class ExtractionResult(BaseModel):
