@@ -46,7 +46,8 @@ class SchemaCache:
     ) -> DiscoveredSchema | None:
         """Look up a cached schema by fingerprint.
 
-        Returns None on cache miss. Increments usage_count on hit.
+        Returns None on cache miss or if the entry is not approved.
+        Increments usage_count on hit.
         """
         cache_key = (tenant_id, fingerprint.key)
         entry = self._store.get(cache_key)
@@ -54,12 +55,16 @@ class SchemaCache:
         if entry is None:
             return None
 
+        # Only return entries that have been explicitly approved
+        if not entry.get("approved", False):
+            return None
+
         # Increment usage count
         entry["usage_count"] += 1
         entry["updated_at"] = datetime.now(timezone.utc)
 
         logger.info(
-            "schema_cache.hit",
+            "schema_cache.approved_hit",
             tenant_id=tenant_id,
             fingerprint=fingerprint.key,
             usage_count=entry["usage_count"],
@@ -73,6 +78,7 @@ class SchemaCache:
         fingerprint: SchemaFingerprint,
         tenant_id: str,
         needs_refinement: bool = False,
+        approved: bool = False,
     ) -> None:
         """Store a discovered schema in the cache.
 
@@ -85,6 +91,8 @@ class SchemaCache:
             tenant_id: Tenant isolation key.
             needs_refinement: If True, flags the schema for review due to
                 high abstention rate (>50% of fields abstained).
+            approved: If True, marks the schema as user-approved and makes
+                it eligible to be returned by lookup(). Defaults to False.
         """
         cache_key = (tenant_id, fingerprint.key)
         now = datetime.now(timezone.utc)
@@ -99,6 +107,7 @@ class SchemaCache:
             "updated_at": now,
             "usage_count": 1,
             "needs_refinement": needs_refinement,
+            "approved": approved,
         }
 
         logger.info(
@@ -108,6 +117,7 @@ class SchemaCache:
             institution=schema.institution,
             document_type_label=schema.document_type_label,
             needs_refinement=needs_refinement,
+            approved=approved,
         )
 
     async def invalidate(

@@ -78,18 +78,18 @@ class JobProgress:
             avg_ms = sum(self._page_times[-20:]) / len(self._page_times[-20:])
             remaining_pages = self.total_pages - self.pages_ocr_complete
             ocr_remaining = (remaining_pages * avg_ms) / 1000.0
-            # Estimate VLM time: ~3s per window, total_pages/9 windows (step=9),
-            # divided by concurrency (10)
-            total_windows = max(1, self.total_pages // 9)
-            vlm_estimate = (total_windows / 10) * 4.0  # 10 concurrent, ~4s per call
+            # Estimate VLM time: ~4s per window, total_pages/13 windows (step=13),
+            # divided by concurrency (8)
+            total_windows = max(1, self.total_pages // 13)
+            vlm_estimate = (total_windows / 8) * 4.0  # 8 concurrent, ~4s per call
             return ocr_remaining + vlm_estimate
 
         if self.current_stage == "vlm":
             if self.vlm_total_windows == 0:
                 return None
-            remaining_windows = self.vlm_total_windows - self.vlm_windows_complete
-            # ~3s per window on average
-            return remaining_windows * 3.0
+            # VLM windows run in parallel — we can't estimate per-window time
+            # Return None to show "processing" instead of a misleading countdown
+            return None
 
         return None
 

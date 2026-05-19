@@ -50,13 +50,13 @@ export default function DataTable({ columns, rows, onRowClick }) {
 
 const styles = {
   wrapper: {
-    overflowX: "auto",
     border: "1px solid var(--color-border-light)",
     borderRadius: "var(--border-radius)",
     backgroundColor: "#fff",
   },
   table: {
-    width: "100%",
+    width: "max-content",
+    minWidth: "100%",
     borderCollapse: "collapse",
     fontSize: "var(--text-base)",
   },

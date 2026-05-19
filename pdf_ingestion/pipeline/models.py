@@ -219,3 +219,14 @@ class DiscoverySample:
         for num, text in zip(self.page_numbers, self.page_texts):
             parts.append(f"--- PAGE {num} ---\n{text}")
         return "\n\n".join(parts)
+@dataclass
+class DiscoveryResult:
+    """Result of a schema discovery operation.
+
+    Captures the outcome of auto-schema discovery including the discovered
+    schema, metadata about the discovery process, and performance metrics.
+    """
+
+    schema: DiscoveredSchema  # the discovered schema definition
+    sample_count: int  # number of pages sampled for discovery
+    processing_time_ms: float  # time taken for discovery in milliseconds

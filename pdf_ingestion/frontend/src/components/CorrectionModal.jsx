@@ -2,6 +2,14 @@ import React, { useState } from "react";
 import { apiPost } from "../hooks/useApi";
 
 /**
+ * Returns true if the submit button should be enabled.
+ * Submit is enabled when the trimmed value is non-empty.
+ */
+export function isSubmitEnabled(value) {
+  return value.trim().length > 0;
+}
+
+/**
  * Modal for submitting inline corrections against extracted field values.
  */
 export default function CorrectionModal({ open, onClose, jobId, fieldName, currentValue, onSuccess }) {
@@ -11,7 +19,7 @@ export default function CorrectionModal({ open, onClose, jobId, fieldName, curre
 
   if (!open) return null;
 
-  const canSubmit = correctedValue.trim().length > 0 && !submitting;
+  const canSubmit = isSubmitEnabled(correctedValue) && !submitting;
 
   const handleSubmit = async () => {
     setSubmitting(true);

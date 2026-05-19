@@ -320,8 +320,8 @@ This plan implements a production-ready PDF extraction service for the reconcili
 - [x] 8. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Chunked VLM extraction and model-aware token budgeting (Week 5)
-  - [ ] 9.1 Extend VLMClientPort with token estimation methods
+- [x] 9. Chunked VLM extraction and model-aware token budgeting (Week 5)
+  - [x] 9.1 Extend VLMClientPort with token estimation methods
     - Add `estimate_tokens(text: str) -> int` abstract method to `pipeline/ports.py`
     - Add `max_context_tokens() -> int` abstract method to `pipeline/ports.py`
     - Update `BedrockVLMClient` in `pipeline/vlm/bedrock_client.py` with concrete implementations
@@ -329,19 +329,19 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Update `MockVLMClient` in `tests/mocks.py` with mock implementations
     - _Requirements: 23.1, 23.2, 23.4, 23.5_
 
-  - [ ] 9.2 Implement TokenBudget tracker
+  - [x] 9.2 Implement TokenBudget tracker
     - Create `pipeline/vlm/token_budget.py` with `TokenBudget` dataclass
     - Implement `record_usage()`, `can_proceed()`, `is_exceeded`, `remaining` properties
     - Support three budget actions: "flag", "skip", "proceed"
     - _Requirements: 24.1, 24.2, 24.3, 24.4, 24.5_
 
-  - [ ] 9.3 Add new error codes to error registry
+  - [x] 9.3 Add new error codes to error registry
     - Add `VLM_BUDGET_EXCEEDED = "ERR_VLM_007"` to `api/errors.py`
     - Add `VLM_WINDOW_FAILED = "ERR_VLM_008"` to `api/errors.py`
     - Add `VLM_MERGE_CONFLICT = "ERR_VLM_009"` to `api/errors.py`
     - _Requirements: 19.1, 24.4_
 
-  - [ ] 9.4 Add chunked extraction configuration to Settings
+  - [x] 9.4 Add chunked extraction configuration to Settings
     - Add `vlm_max_tokens_per_job: int = 100_000` to `api/config.py`
     - Add `vlm_budget_exceeded_action: str = "flag"` to `api/config.py`
     - Add `vlm_window_size: int = 12` to `api/config.py`
@@ -349,19 +349,19 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Add `vlm_max_concurrent_windows: int = 3` to `api/config.py`
     - _Requirements: 22.3, 22.8, 24.2_
 
-  - [ ] 9.5 Implement tier selection logic
+  - [x] 9.5 Implement tier selection logic
     - Create `pipeline/vlm/chunked_extractor.py` with `select_extraction_tier()` function
     - Implement decision matrix: single (fits in window) → tier1 (header fields only) → tier2 (<80 pages) → tier3 (>=80 pages)
     - Use `vlm_client.estimate_tokens()` and `vlm_client.max_context_tokens()` for sizing decisions
     - _Requirements: 22.1, 22.5, 22.6, 22.7, 23.3_
 
-  - [ ] 9.6 Implement Tier 1 — Targeted page selection
+  - [x] 9.6 Implement Tier 1 — Targeted page selection
     - Implement `FIELD_PAGE_MAPPING` dictionary mapping field names to expected page ranges
     - Implement `select_target_pages()` function that groups abstained fields by target page ranges
     - Send only relevant 2-5 pages per field group in a single LLM call
     - _Requirements: 22.5_
 
-  - [ ] 9.7 Implement Tier 2 — Sliding window with overlap
+  - [x] 9.7 Implement Tier 2 — Sliding window with overlap
     - Implement `WindowConfig` dataclass with window_size, overlap, max_concurrent
     - Implement `create_sliding_windows()` function that creates overlapping page windows
     - Implement parallel window processing with asyncio.Semaphore for rate limiting
@@ -369,28 +369,28 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Ensure overlap of configurable pages (default 3) between adjacent windows
     - _Requirements: 22.1, 22.2, 22.3, 22.6, 22.8_
 
-  - [ ] 9.8 Implement result merging and transaction deduplication
+  - [x] 9.8 Implement result merging and transaction deduplication
     - Implement `merge_window_results()` function that combines results from multiple windows
     - Implement `TransactionKey` composite key (date, description, amount) for dedup
     - Header fields taken from first window; closing balance from last window
     - Transactions deduplicated by composite key in overlap regions
     - _Requirements: 22.4, 22.9_
 
-  - [ ] 9.9 Implement Tier 3 — Two-pass summarize-then-extract
+  - [x] 9.9 Implement Tier 3 — Two-pass summarize-then-extract
     - Implement `PAGE_SUMMARY_PROMPT` for lightweight per-page field detection
     - Implement Pass 1: send each page individually for structured summary
     - Implement Pass 2: send summaries + only pages containing target fields
     - Implement `_identify_relevant_pages()` to select pages for Pass 2
     - _Requirements: 22.7_
 
-  - [ ] 9.10 Implement usage event emission
+  - [x] 9.10 Implement usage event emission
     - Create `pipeline/vlm/usage_events.py` with `VLMUsageEvent` and `VLMJobUsageSummary` dataclasses
     - Implement `emit_window_usage()` — structured log event per LLM call
     - Implement `emit_job_usage_summary()` — aggregate log event at job completion
     - Include cost attribution metadata (tenant_id, job_id, schema_type, model_id)
     - _Requirements: 24.6, 24.7, 24.8_
 
-  - [ ] 9.11 Integrate chunked extraction into pipeline runner
+  - [x] 9.11 Integrate chunked extraction into pipeline runner
     - Update `_vlm_fallback()` in `pipeline/runner.py` to use chunked extraction when document exceeds context window
     - Wire `TokenBudget` initialization from Settings
     - Wire tier selection and dispatch to appropriate extraction tier
@@ -398,7 +398,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Handle budget exceeded action (flag/skip/proceed)
     - _Requirements: 22.1, 24.2, 24.3, 24.4, 24.5_
 
-  - [ ] 9.12 Write unit tests for chunked extraction
+  - [x] 9.12 Write unit tests for chunked extraction
     - Test tier selection logic with various document sizes and abstention patterns
     - Test sliding window creation with different page counts and overlap settings
     - Test transaction deduplication with overlap scenarios
@@ -414,11 +414,11 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - **Property 28: Usage Event Completeness** — every LLM call emits window_usage; every job emits job_usage_summary
     - **Validates: Requirements 22.1, 22.2, 22.4, 23.1, 23.2, 24.1, 24.6, 24.7**
 
-- [ ] 10. Checkpoint - Ensure all chunked extraction tests pass
+- [x] 10. Checkpoint - Ensure all chunked extraction tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 11. Auto-schema discovery data models and error codes (Week 6)
-  - [ ] 11.1 Add discovery data models to pipeline/models.py
+- [x] 11. Auto-schema discovery data models and error codes (Week 6)
+  - [x] 11.1 Add discovery data models to pipeline/models.py
     - Add `SchemaFingerprint` dataclass with `institution`, `document_type_label`, `key` property, and `from_key()` classmethod
     - Add `DiscoveredFieldDefinition` dataclass with `field_name`, `description`, `location_hint`
     - Add `DiscoveredTableDefinition` dataclass with `table_type`, `expected_headers`, `data_pattern`, `location_hint`
@@ -426,27 +426,27 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Add `DiscoverySample` dataclass with `page_texts`, `page_numbers`, `estimated_tokens`, `page_count` property, and `combined_text` property
     - _Requirements: 25.1, 26.1, 26.2, 26.3, 28.1_
 
-  - [ ] 11.2 Add discovery error codes to api/errors.py
+  - [x] 11.2 Add discovery error codes to api/errors.py
     - Add `DISCOVERY_SCHEMA_ANALYSIS_FAILED = "ERR_DISCOVERY_001"` to `ErrorCode`
     - Add `DISCOVERY_DYNAMIC_EXTRACTION_FAILED = "ERR_DISCOVERY_002"` to `ErrorCode`
     - Add `DISCOVERY_CACHE_LOOKUP_FAILED = "ERR_DISCOVERY_003"` to `ErrorCode`
     - _Requirements: 30.1_
 
-  - [ ] 11.3 Add discovery configuration to api/config.py
+  - [x] 11.3 Add discovery configuration to api/config.py
     - Add `discovery_sample_pages: int = 5` to `Settings`
     - Add `discovery_max_context_ratio: float = 0.80` to `Settings`
     - Add `discovery_cache_enabled: bool = True` to `Settings`
     - _Requirements: 26.1, 26.6, 28.2_
 
 - [ ] 12. Schema cache database and component (Week 6)
-  - [ ] 12.1 Create schema cache database migration
+  - [x] 12.1 Create schema cache database migration
     - Create `db/migrations/versions/20250XXX_auto_schema_cache.py` with `discovered_schemas` table
     - Table columns: `id` (UUID PK), `tenant_id` (UUID FK), `fingerprint_key` (VARCHAR 512), `institution` (VARCHAR 256), `document_type_label` (VARCHAR 256), `schema_json` (JSONB), `created_at` (TIMESTAMPTZ), `updated_at` (TIMESTAMPTZ), `usage_count` (INTEGER DEFAULT 1)
     - Add UNIQUE constraint on `(tenant_id, fingerprint_key)`
     - Add indexes: `idx_discovered_schemas_tenant`, `idx_discovered_schemas_fingerprint`
     - _Requirements: 28.1, 28.3, 28.6_
 
-  - [ ] 12.2 Implement SchemaCache component
+  - [~] 12.2 Implement SchemaCache component
     - Create `pipeline/discovery/schema_cache.py` with `SchemaCache` class
     - Implement `lookup(fingerprint, tenant_id)` — returns `DiscoveredSchema | None`, increments `usage_count` on hit
     - Implement `store(schema, fingerprint, tenant_id)` — upserts schema, sets `created_at` and `usage_count`
@@ -456,20 +456,20 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - _Requirements: 28.1, 28.2, 28.3, 28.4, 28.6_
 
 - [ ] 13. AutoSchemaDiscovery component implementation (Week 6)
-  - [ ] 13.1 Implement sample selection and VLM prompt construction
+  - [~] 13.1 Implement sample selection and VLM prompt construction
     - Create `pipeline/discovery/auto_discovery.py` with `AutoSchemaDiscovery` class
     - Implement `_select_sample(doc, max_pages)` — selects first N pages (default 5), adaptively reduces if token estimate exceeds 80% of context window
     - Implement `_build_analysis_prompt(sample_text)` — constructs the `SCHEMA_ANALYSIS_PROMPT` with page content
     - Use `vlm_client.estimate_tokens()` for token estimation and `vlm_client.max_context_tokens()` for budget check
     - _Requirements: 26.1, 26.2, 26.6_
 
-  - [ ] 13.2 Implement VLM response parsing
+  - [~] 13.2 Implement VLM response parsing
     - Implement `_parse_schema_response(raw_response)` — parses JSON into `DiscoveredSchema`
     - Return `None` for null, empty, or malformed JSON responses
     - Validate that parsed schema has non-empty `document_type_label`, `institution`, and at least one field or table definition
     - _Requirements: 26.3, 26.4_
 
-  - [ ] 13.3 Implement main discovery flow
+  - [~] 13.3 Implement main discovery flow
     - Implement `discover(doc, tenant, token_budget, trace_id)` method
     - Step 1: Check circuit breaker — abstain with ERR_VLM_005 if open
     - Step 2: Check schema cache for existing match (by partial fingerprint from doc signals)
@@ -481,7 +481,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - _Requirements: 25.1, 25.3, 25.4, 25.5, 26.1, 26.4, 26.5, 28.2, 28.5, 30.2, 30.3_
 
 - [ ] 14. DynamicExtractor component implementation (Week 6)
-  - [ ] 14.1 Implement DynamicExtractor class
+  - [~] 14.1 Implement DynamicExtractor class
     - Create `pipeline/discovery/dynamic_extractor.py` with `DynamicExtractor` class
     - Implement `extract(doc, schema, tenant, token_budget, trace_id)` method
     - Use DiscoveredSchema field definitions to build extraction prompts
@@ -491,7 +491,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Verify each extracted value against token stream via Verifier (threshold 0.85)
     - _Requirements: 27.1, 27.2, 27.3, 27.4, 27.5, 27.6_
 
-  - [ ] 14.2 Implement output format compliance
+  - [~] 14.2 Implement output format compliance
     - Set `provenance.source = "vlm"` on all extracted fields
     - Set `provenance.extraction_rule = "discovered:{field_name}"` on all fields
     - Set `schema_type = "discovered:{document_type_label}"` on the extraction result
@@ -501,7 +501,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - _Requirements: 27.7, 29.1, 29.2, 29.3, 29.4, 30.4_
 
 - [ ] 15. Schema router modification (Week 6)
-  - [ ] 15.1 Integrate auto-discovery into route_and_extract
+  - [~] 15.1 Integrate auto-discovery into route_and_extract
     - Modify `pipeline/schemas/router.py` `route_and_extract()` function
     - When `detect_schema()` returns "unknown" and `tenant.vlm_enabled` is True: delegate to `AutoSchemaDiscovery`
     - If discovery returns `DiscoveredSchema`: create `DynamicExtractor` and extract
@@ -510,11 +510,11 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Pass `schema_cache`, `token_budget`, and `trace_id` through to discovery
     - _Requirements: 25.1, 25.2_
 
-- [ ] 16. Checkpoint - Ensure discovery core components work
+- [~] 16. Checkpoint - Ensure discovery core components work
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 17. API endpoints and validator modification (Week 7)
-  - [ ] 17.1 Implement schema cache API endpoints
+  - [~] 17.1 Implement schema cache API endpoints
     - Create `api/routes/schema_cache.py` with router
     - Implement `DELETE /v1/tenants/{tenant_id}/schema-cache/{fingerprint}` — invalidates a cached schema
     - Implement `GET /v1/tenants/{tenant_id}/schema-cache` — lists all cached schemas for the tenant
@@ -524,20 +524,20 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Register router in `api/main.py`
     - _Requirements: 28.4, 28.6_
 
-  - [ ] 17.2 Modify Validator for discovered schemas
+  - [~] 17.2 Modify Validator for discovered schemas
     - Add `select_validators(schema_type)` function to `pipeline/validators.py`
     - When `schema_type.startswith("discovered:")`: return only generic validators (date_range, currency_code, provenance_integrity)
     - When schema_type is a known static type: return full validator suite including IBAN, ISIN, BIC, arithmetic_balance
     - Update `run_validators()` to use `select_validators()` for validator selection
     - _Requirements: 29.6_
 
-  - [ ] 17.3 Modify Packager for discovered schemas
+  - [~] 17.3 Modify Packager for discovered schemas
     - Update `pipeline/packager.py` to handle `schema_type` values prefixed with `"discovered:"`
     - Include the `DiscoveredSchema` definition in the output metadata when schema_type is discovered
     - _Requirements: 29.5_
 
 - [ ] 18. Structured log events for discovery (Week 7)
-  - [ ] 18.1 Implement discovery log events
+  - [~] 18.1 Implement discovery log events
     - Emit `discovery.triggered` with job_id, tenant_id, filename when auto-discovery starts
     - Emit `discovery.cache_hit` with job_id, tenant_id, fingerprint, usage_count when cached schema reused
     - Emit `discovery.cache_miss` with job_id, tenant_id when no cached schema found
@@ -549,7 +549,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - _Requirements: 25.3, 28.5, 30.2, 30.3, 30.4, 30.6_
 
 - [ ] 19. Unit tests for auto-schema discovery (Week 7)
-  - [ ] 19.1 Write unit tests for data models and schema cache
+  - [~] 19.1 Write unit tests for data models and schema cache
     - Test `SchemaFingerprint.key` property normalisation (lowercase, stripped, spaces→underscores)
     - Test `SchemaFingerprint.from_key()` round-trip parsing
     - Test `DiscoveredSchema.__post_init__` auto-computes fingerprint
@@ -559,7 +559,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Test `SchemaCache.invalidate()` returns True/False appropriately
     - _Requirements: 28.1, 28.2, 28.3_
 
-  - [ ] 19.2 Write unit tests for AutoSchemaDiscovery
+  - [~] 19.2 Write unit tests for AutoSchemaDiscovery
     - Test sample selection with documents of varying page counts (1, 5, 50, 500 pages)
     - Test adaptive sample reduction when token estimate exceeds 80% of context window
     - Test VLM prompt construction includes correct page markers and schema structure
@@ -570,7 +570,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Test token budget exhausted → abstention with ERR_VLM_007
     - _Requirements: 25.1, 25.4, 25.5, 26.1, 26.3, 26.4, 26.6_
 
-  - [ ] 19.3 Write unit tests for DynamicExtractor
+  - [~] 19.3 Write unit tests for DynamicExtractor
     - Test field extraction prompt uses discovered field definitions
     - Test table extraction prompt uses discovered expected headers
     - Test output format: provenance.source="vlm", extraction_rule="discovered:{name}", schema_type prefix
@@ -578,7 +578,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Test all fields abstained → correct ERR_EXTRACT_001 abstentions produced
     - _Requirements: 27.1, 27.2, 27.3, 27.6, 27.7, 29.1, 29.2, 29.3_
 
-  - [ ] 19.4 Write unit tests for schema router and validator
+  - [~] 19.4 Write unit tests for schema router and validator
     - Test routing: schema_type="unknown" + vlm_enabled=True → discovery triggered
     - Test routing: schema_type="unknown" + vlm_enabled=False → ERR_EXTRACT_002 abstention
     - Test routing: known schema_type → static extractor used (unchanged behaviour)
@@ -652,7 +652,7 @@ This plan implements a production-ready PDF extraction service for the reconcili
     - Assert: all structured log events emitted (discovery.triggered, discovery.schema_analysed, discovery.extraction_complete)
     - _Requirements: 25.1, 26.3, 27.1, 28.1, 28.2, 28.4, 28.5, 29.3, 30.2_
 
-- [ ] 22. Final checkpoint - Ensure all auto-schema discovery tests pass
+- [~] 22. Final checkpoint - Ensure all auto-schema discovery tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

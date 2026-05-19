@@ -22,11 +22,18 @@ if TYPE_CHECKING:
 
 from api.config import Settings
 from api.errors import ErrorCode
-from api.models.response import Abstention, Field, FinalOutput, Provenance, Table
+from api.models.response import (
+    Abstention,
+    Field,
+    FinalOutput,
+    Provenance,
+    Table,
+    TableRow,
+    TriangulationInfo,
+)
 from api.models.tenant import TenantContext
 from pipeline.assembler import assemble
 from pipeline.classifier import classify_page
-from pipeline.delivery import on_job_complete
 from pipeline.extractors.camelot_extractor import extract_tables_camelot
 from pipeline.extractors.digital import extract_digital_page
 from pipeline.ingestion import ingest, IngestionError
@@ -36,8 +43,6 @@ from pipeline.models import (
     EntityRedactionConfig,
     IngestedDocument,
     PageOutput,
-    Token,
-    VLMFieldResult,
 )
 from pipeline.packager import package_result
 from pipeline.ports import DeliveryPort, OCRClientPort, RedactorPort, VLMClientPort
@@ -175,9 +180,7 @@ async def process_document(
                     page_output = extract_digital_page(page, page_num)
 
                     # Camelot extraction for triangulation
-                    camelot_tables = extract_tables_camelot(
-                        doc.content, page_num
-                    )
+                    camelot_tables = extract_tables_camelot(doc.content, page_num)
 
                     # ── Stage 4: Triangulation ───────────────────────────────
                     for i, pdfplumber_table in enumerate(page_output.tables):
@@ -212,10 +215,9 @@ async def process_document(
 
             async def _ocr_page(page_num: int, page_image: bytes) -> tuple[int, PageOutput]:
                 import time as _time
+
                 _start = _time.time()
-                tokens = await asyncio.to_thread(
-                    ports.ocr_client.extract_tokens, page_image
-                )
+                tokens = await asyncio.to_thread(ports.ocr_client.extract_tokens, page_image)
                 if progress:
                     elapsed_ms = (_time.time() - _start) * 1000
                     progress.record_page_complete(elapsed_ms)
@@ -243,14 +245,15 @@ async def process_document(
             # Run OCR concurrently (limit concurrency to avoid overwhelming resources)
             ocr_semaphore = asyncio.Semaphore(settings.ocr_concurrency)
 
-            async def _ocr_with_semaphore(page_num: int, page_image: bytes) -> tuple[int, PageOutput]:
+            async def _ocr_with_semaphore(
+                page_num: int, page_image: bytes
+            ) -> tuple[int, PageOutput]:
                 async with ocr_semaphore:
                     return await _ocr_page(page_num, page_image)
 
             if scanned_pages:
                 ocr_tasks = [
-                    _ocr_with_semaphore(page_num, image)
-                    for page_num, image in scanned_pages
+                    _ocr_with_semaphore(page_num, image) for page_num, image in scanned_pages
                 ]
                 ocr_results = await asyncio.gather(*ocr_tasks)
                 scanned_outputs: dict[int, PageOutput] = {
@@ -282,7 +285,7 @@ async def process_document(
         )
 
     # ── Stage 5: Section Segmentation ───────────────────────────────────────
-    from pipeline.section_segmenter import segment_document, DocumentSection
+    from pipeline.section_segmenter import segment_document
 
     sections = segment_document(page_outputs)
 
@@ -291,23 +294,19 @@ async def process_document(
     all_page_texts: list[str] = []
     try:
         import io as _io
+
         with pdfplumber.open(_io.BytesIO(doc.content)) as pdf:
             for page_idx, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
                 # If pdfplumber returned little text, use OCR tokens instead
                 if len(text.strip()) < 50 and page_idx < len(page_outputs):
-                    ocr_text = " ".join(
-                        t.text for t in page_outputs[page_idx].tokens if t.text
-                    )
+                    ocr_text = " ".join(t.text for t in page_outputs[page_idx].tokens if t.text)
                     if ocr_text:
                         text = ocr_text
                 all_page_texts.append(text)
     except Exception:
         # Fallback: build from OCR tokens
-        all_page_texts = [
-            " ".join(t.text for t in po.tokens if t.text)
-            for po in page_outputs
-        ]
+        all_page_texts = [" ".join(t.text for t in po.tokens if t.text) for po in page_outputs]
 
     # Log page text quality
     non_empty = sum(1 for t in all_page_texts if len(t.strip()) > 10)
@@ -360,29 +359,237 @@ async def process_document(
         section_tables: list[Table] = section_result.get("tables", [])
         section_abstentions: list[Abstention] = section_result.get("abstentions", [])
 
-        section_data.append({
-            "idx": section_idx,
-            "section": section,
-            "assembled": section_assembled,
-            "schema": section_schema,
-            "fields": section_fields,
-            "tables": section_tables,
-            "abstentions": section_abstentions,
-        })
+        # Fallback: if no tables were extracted by the rule-based extractor,
+        # try the text-based table parser for fixed-width columnar data.
+        # When VLM is enabled, still try text parser first as a fast path —
+        # VLM will handle quality scoring and escalation if text parser output
+        # is poor quality.
+        llm_escalated_flag = False
+        if not section_tables:
+            has_table_abstention = any(
+                a.field is None and a.table_id is not None for a in section_abstentions
+            )
+            if has_table_abstention:
+                from pipeline.extractors.text_table_parser import detect_text_tables
+
+                section_page_texts = all_page_texts[section.start_page - 1 : section.end_page]
+                text_tables = detect_text_tables(section_page_texts)
+                if text_tables:
+                    for tt in text_tables:
+                        table_obj = Table(
+                            table_id=f"text_{tt.table_type}_{len(section_tables)}",
+                            type=tt.table_type,
+                            page_range=tt.page_range,
+                            headers=tt.headers,
+                            triangulation=TriangulationInfo(
+                                score=0.7,
+                                verdict="agreement",
+                                winner="text_parser",
+                                methods=["text_parser"],
+                            ),
+                            rows=[
+                                TableRow(cells=list(row.values()), row_index=i)
+                                for i, row in enumerate(tt.rows)
+                            ],
+                        )
+                        section_tables.append(table_obj)
+                    # Remove the table abstention since we found tables
+                    section_abstentions = [
+                        a
+                        for a in section_abstentions
+                        if not (a.field is None and a.table_id is not None)
+                    ]
+                    logger.info(
+                        "text_table_parser.resolved",
+                        section_index=section_idx,
+                        tables_found=len(text_tables),
+                        total_rows=sum(len(t.rows) for t in text_tables),
+                    )
+
+        if section_tables and tenant.vlm_enabled:
+            # ── Quality scoring + LLM escalation ────────────────────────────
+            # Evaluate text-parser output quality. If the scorer returns
+            # "fail", discard the text-parser tables and re-run extraction
+            # via LLM. On success, replace section_tables with LLM output
+            # and set llm_escalated_flag so FinalOutput.llm_escalated is set.
+            # Skip scoring if tables came from pdfplumber (already high quality)
+            # — only score text_table_parser output.
+            is_text_parser_output = any(t.table_id.startswith("text_") for t in section_tables)
+            if is_text_parser_output:
+                from pipeline.quality_scorer import score_tables
+                import time as _time
+
+                _qs_start = _time.time()
+                quality_result = score_tables(section_tables)
+                duration_ms = (_time.time() - _qs_start) * 1000
+
+                logger.info(
+                    "quality_scorer.result",
+                    job_id=job_id,
+                    verdict=quality_result.verdict,
+                    failed_checks=quality_result.failed_checks,
+                    checks=[
+                        {
+                            "name": c.name,
+                            "passed": c.passed,
+                            "metric": c.metric,
+                            "threshold": c.threshold,
+                        }
+                        for c in quality_result.checks
+                    ],
+                    duration_ms=round(duration_ms, 2),
+                )
+
+                if quality_result.verdict == "fail":
+                    discarded_count = len(section_tables)
+                    logger.info(
+                        "quality_scorer.escalated",
+                        job_id=job_id,
+                        failed_checks=quality_result.failed_checks,
+                        tables_discarded=discarded_count,
+                    )
+                    section_tables = []  # discard text-parser output
+
+                    section_page_texts = all_page_texts[section.start_page - 1 : section.end_page]
+                    try:
+                        llm_result = await extract_document_with_llm(
+                            document_text="\n\n".join(section_page_texts),
+                            vlm_client=ports.vlm_client,
+                            page_texts=section_page_texts,
+                        )
+
+                        if "error" in llm_result:
+                            raise RuntimeError(
+                                f"LLM escalation returned error: {llm_result.get('error')}"
+                            )
+
+                        # Convert LLM result tables to Table objects (same pattern
+                        # as the existing VLM fallback in this file).
+                        llm_tables: list[Table] = []
+                        accounts = llm_result.get("accounts", [])
+                        for acct in accounts:
+                            for raw_tbl in acct.get("tables", []):
+                                if not isinstance(raw_tbl, dict):
+                                    continue
+                                headers = raw_tbl.get("headers", [])
+                                rows_raw = raw_tbl.get("rows", [])
+                                page_range = raw_tbl.get("page_range", [])
+                                table_type = raw_tbl.get("table_type", "unknown")
+                                table_obj = Table(
+                                    table_id=f"llm_{table_type}_{len(llm_tables)}",
+                                    type=table_type,
+                                    page_range=page_range,
+                                    headers=headers,
+                                    triangulation=TriangulationInfo(
+                                        score=0.9,
+                                        verdict="agreement",
+                                        winner="llm",
+                                        methods=["llm_escalation"],
+                                    ),
+                                    rows=[
+                                        TableRow(
+                                            cells=[row.get(h) for h in headers],
+                                            row_index=i,
+                                        )
+                                        for i, row in enumerate(rows_raw)
+                                        if isinstance(row, dict)
+                                    ],
+                                )
+                                llm_tables.append(table_obj)
+
+                        if llm_tables:
+                            section_tables = llm_tables
+                            llm_escalated_flag = True
+
+                            # Store discovered schema in PendingSchemaStore so the
+                            # frontend can show the SchemaApprovalBanner.
+                            try:
+                                from api.main import app as _app
+                                from pipeline.models import DiscoveredSchema, SchemaFingerprint
+
+                                pending_store = getattr(_app.state, "pending_schema_store", None)
+                                if pending_store is not None:
+                                    institution = llm_result.get("institution") or "unknown"
+                                    doc_type = (
+                                        llm_result.get("document_type")
+                                        or section_schema
+                                        or "unknown"
+                                    )
+                                    discovered_schema = DiscoveredSchema(
+                                        document_type_label=doc_type,
+                                        institution=institution,
+                                    )
+                                    fingerprint = SchemaFingerprint(
+                                        institution=institution,
+                                        document_type_label=doc_type,
+                                    )
+                                    pending_id = pending_store.store_pending(
+                                        schema=discovered_schema,
+                                        fingerprint=fingerprint,
+                                        tenant_id=tenant.id,
+                                        job_id=job_id or "",
+                                    )
+                                    logger.info(
+                                        "quality_scorer.pending_schema_stored",
+                                        job_id=job_id,
+                                        pending_id=pending_id,
+                                    )
+                            except Exception as _pss_exc:
+                                logger.warning(
+                                    "quality_scorer.pending_schema_store_failed",
+                                    job_id=job_id,
+                                    error=str(_pss_exc),
+                                )
+                        else:
+                            logger.info(
+                                "quality_scorer.escalation_empty",
+                                job_id=job_id,
+                            )
+
+                    except Exception as _esc_exc:
+                        logger.warning(
+                            "quality_scorer.escalation_failed",
+                            job_id=job_id,
+                            error=str(_esc_exc),
+                        )
+                        # Re-instate the discarded text-parser tables
+                        section_tables = section_tables if section_tables else []
+                        # section_tables was set to [] above; we need to restore
+                        # the originals — rebuild from section_result
+                        section_tables = list(section_result.get("tables", []))
+
+                else:
+                    logger.info(
+                        "quality_scorer.escalation_skipped",
+                        job_id=job_id,
+                        reason="quality_pass",
+                    )
+
+        section_data.append(
+            {
+                "idx": section_idx,
+                "section": section,
+                "assembled": section_assembled,
+                "schema": section_schema,
+                "fields": section_fields,
+                "tables": section_tables,
+                "abstentions": section_abstentions,
+                "llm_escalated": llm_escalated_flag,
+            }
+        )
 
         # Update progress with partial results from rule-based extraction
         if progress and section_fields:
             partial = {k: v.value for k, v in section_fields.items() if v.value is not None}
             progress.update_partial_fields(partial)
-            progress.update_partial_tables(
-                progress.partial_tables_count + len(section_tables)
-            )
+            progress.update_partial_tables(progress.partial_tables_count + len(section_tables))
 
     # ── Phase 2: VLM fallback for all sections in parallel ────────────────────
     if progress:
         progress.current_stage = "vlm"
         total_vlm_sections = sum(
-            1 for sd in section_data
+            1
+            for sd in section_data
             if tenant.vlm_enabled and (sd["abstentions"] or sd["schema"] == "unknown")
         )
         progress.vlm_total_windows = total_vlm_sections
@@ -429,8 +636,11 @@ async def process_document(
             sd["schema"] = "unknown"
 
         # When schema is unknown, trigger full VLM extraction
-        if section_schema == "unknown" and not any(a.field is not None for a in section_abstentions):
+        if section_schema == "unknown" and not any(
+            a.field is not None for a in section_abstentions
+        ):
             from api.models.response import Abstention as AbstentionModel
+
             synthetic_abstentions = [
                 AbstentionModel(
                     field=f_name,
@@ -439,8 +649,14 @@ async def process_document(
                     detail=f"Schema unknown for section {section_idx + 1} (pages {section.start_page}-{section.end_page})",
                     vlm_attempted=False,
                 )
-                for f_name in ["institution", "client_name", "account_number",
-                               "statement_date", "opening_balance", "closing_balance"]
+                for f_name in [
+                    "institution",
+                    "client_name",
+                    "account_number",
+                    "statement_date",
+                    "opening_balance",
+                    "closing_balance",
+                ]
             ]
             section_abstentions = synthetic_abstentions + section_abstentions
 
@@ -454,7 +670,7 @@ async def process_document(
             pdf_content=doc.content,
             settings=settings,
             job_id=job_id or "",
-            section_page_texts=all_page_texts[section.start_page - 1:section.end_page],
+            section_page_texts=all_page_texts[section.start_page - 1 : section.end_page],
             progress=None,  # Don't update progress per-section (tracked at batch level)
         )
 
@@ -475,6 +691,56 @@ async def process_document(
         sd["fields"] = merged_fields
         sd["abstentions"] = new_abstentions
         sd["schema"] = section_schema
+
+        # Convert VLM-extracted tables (from accounts field) into Table objects
+        # so they appear in the final output's tables list, not just as nested data.
+        accounts_field = new_fields.get("accounts")
+        if accounts_field and accounts_field.value and not sd["tables"]:
+            accounts_val = accounts_field.value
+            if isinstance(accounts_val, list):
+                vlm_tables: list[Table] = []
+                for acct in accounts_val:
+                    if not isinstance(acct, dict):
+                        continue
+                    for raw_tbl in acct.get("tables", []):
+                        if not isinstance(raw_tbl, dict):
+                            continue
+                        headers = raw_tbl.get("headers", [])
+                        rows_raw = raw_tbl.get("rows", [])
+                        page_range = raw_tbl.get("page_range", [])
+                        table_type = raw_tbl.get("table_type", "unknown")
+                        table_obj = Table(
+                            table_id=f"vlm_{table_type}_{len(vlm_tables)}",
+                            type=table_type,
+                            page_range=page_range
+                            if page_range
+                            else list(range(section.start_page, section.end_page + 1)),
+                            headers=headers,
+                            triangulation=TriangulationInfo(
+                                score=0.9,
+                                verdict="agreement",
+                                winner="vlm",
+                                methods=["vlm_extraction"],
+                            ),
+                            rows=[
+                                TableRow(
+                                    cells=[row.get(h) for h in headers],
+                                    row_index=i,
+                                )
+                                for i, row in enumerate(rows_raw)
+                                if isinstance(row, dict)
+                            ],
+                        )
+                        vlm_tables.append(table_obj)
+                if vlm_tables:
+                    sd["tables"] = vlm_tables
+                    logger.info(
+                        "vlm.tables_extracted",
+                        section_index=section_idx,
+                        tables_count=len(vlm_tables),
+                        total_rows=sum(len(t.rows) for t in vlm_tables),
+                        headers=[t.headers for t in vlm_tables],
+                    )
 
         # Update progress store with partial results as fields are extracted
         if progress:
@@ -531,9 +797,12 @@ async def process_document(
                         all_fields[field_name] = Field(
                             value=existing_accounts + new_accounts,
                             original_string=field_value.original_string,
-                            confidence=min(all_fields[field_name].confidence, field_value.confidence),
+                            confidence=min(
+                                all_fields[field_name].confidence, field_value.confidence
+                            ),
                             vlm_used=all_fields[field_name].vlm_used or field_value.vlm_used,
-                            redaction_applied=all_fields[field_name].redaction_applied or field_value.redaction_applied,
+                            redaction_applied=all_fields[field_name].redaction_applied
+                            or field_value.redaction_applied,
                             provenance=field_value.provenance,
                         )
             elif field_name not in all_fields:
@@ -583,7 +852,11 @@ async def process_document(
                     existing["tables"] = existing_tables + new_tables
                     # Fill in missing scalar fields
                     for k, v in acct.items():
-                        if k not in ("transactions", "tables") and v is not None and not existing.get(k):
+                        if (
+                            k not in ("transactions", "tables")
+                            and v is not None
+                            and not existing.get(k)
+                        ):
                             existing[k] = v
                 else:
                     merged_accounts[key] = dict(acct)
@@ -593,9 +866,14 @@ async def process_document(
 
             # Filter out accounts with no useful data
             final_accounts = [
-                acct for acct in merged_accounts.values()
-                if (acct.get("transactions") or acct.get("tables") or
-                    acct.get("opening_balance") is not None or acct.get("closing_balance") is not None)
+                acct
+                for acct in merged_accounts.values()
+                if (
+                    acct.get("transactions")
+                    or acct.get("tables")
+                    or acct.get("opening_balance") is not None
+                    or acct.get("closing_balance") is not None
+                )
             ]
 
             all_fields["accounts"] = Field(
@@ -608,7 +886,11 @@ async def process_document(
             )
 
     # Use merged results
-    schema_type = resolved_schema_type if resolved_schema_type != "unknown" else (schema_type_hint or "unknown")
+    schema_type = (
+        resolved_schema_type
+        if resolved_schema_type != "unknown"
+        else (schema_type_hint or "unknown")
+    )
     fields = all_fields
     tables = all_tables
     abstentions = all_abstentions
@@ -623,29 +905,30 @@ async def process_document(
         if has_data:
             # Remove transaction table abstentions
             abstentions = [
-                a for a in abstentions
-                if not (a.table_id and "transactions" in str(a.table_id))
+                a for a in abstentions if not (a.table_id and "transactions" in str(a.table_id))
             ]
             # Remove positions table abstentions (custody schema)
             abstentions = [
-                a for a in abstentions
-                if not (a.table_id and "positions" in str(a.table_id))
+                a for a in abstentions if not (a.table_id and "positions" in str(a.table_id))
             ]
             # Remove custody-specific field abstentions when VLM extracted accounts
-            custody_fields = {"portfolio_id", "valuation_date", "total_value",
-                              "trade_date", "settlement_date", "isin", "quantity",
-                              "price", "counterparty_bic", "opening_balance"}
-            abstentions = [
-                a for a in abstentions
-                if a.field not in custody_fields
-            ]
+            custody_fields = {
+                "portfolio_id",
+                "valuation_date",
+                "total_value",
+                "trade_date",
+                "settlement_date",
+                "isin",
+                "quantity",
+                "price",
+                "counterparty_bic",
+                "opening_balance",
+            }
+            abstentions = [a for a in abstentions if a.field not in custody_fields]
 
     # Remove field abstentions for fields that were actually extracted
     resolved_field_names = set(fields.keys())
-    abstentions = [
-        a for a in abstentions
-        if a.field is None or a.field not in resolved_field_names
-    ]
+    abstentions = [a for a in abstentions if a.field is None or a.field not in resolved_field_names]
 
     # ── Self-Healing: Check if retry is needed ───────────────────────────────
     from pipeline.self_healing.diagnostic_retry import DiagnosticRetry
@@ -667,7 +950,9 @@ async def process_document(
 
         if strategy == "auto_discovery" and schema_cache and tenant.vlm_enabled:
             # Retry with auto-discovery (force unknown schema)
-            logger.info("self_healing.retrying_with_discovery", trace_id=trace_id, strategy=strategy)
+            logger.info(
+                "self_healing.retrying_with_discovery", trace_id=trace_id, strategy=strategy
+            )
             from pipeline.discovery.auto_discovery import AutoSchemaDiscovery
             from pipeline.discovery.dynamic_extractor import DynamicExtractor
             from pipeline.vlm.token_budget import TokenBudget as _RetryBudget
@@ -678,7 +963,9 @@ async def process_document(
             )
             discovery = AutoSchemaDiscovery(ports.vlm_client, ports.redactor, schema_cache)
             assembled_for_retry = assemble(page_outputs)
-            discovered = await discovery.discover(assembled_for_retry, tenant, retry_budget, trace_id)
+            discovered = await discovery.discover(
+                assembled_for_retry, tenant, retry_budget, trace_id
+            )
 
             if not isinstance(discovered, Abstention):
                 extractor = DynamicExtractor(ports.vlm_client, ports.redactor)
@@ -709,6 +996,7 @@ async def process_document(
     # ── Stage 8: Validation ──────────────────────────────────────────────────
     # Build a preliminary FinalOutput for validation
     from pipeline.validator import ValidationReport
+
     preliminary_output = package_result(
         doc_id=doc_id,
         schema_type=schema_type,
@@ -757,6 +1045,10 @@ async def process_document(
         vlm_used=any(f.vlm_used for f in fields.values()),
         status=final_output.status,
     )
+
+    # Set llm_escalated flag if any section was escalated to LLM
+    if any(sd.get("llm_escalated", False) for sd in section_data):
+        final_output.llm_escalated = True
 
     # ── Stage 10: Delivery ───────────────────────────────────────────────────
     # Delivery is triggered asynchronously after job completion.
@@ -813,15 +1105,13 @@ async def _vlm_fallback(
     # Separate table abstentions (not handled by LLM extraction)
     field_abstentions = [a for a in abstentions if a.field is not None]
     table_abstentions = [a for a in abstentions if a.field is None]
-    has_transaction_abstention = any(
-        "transaction" in str(a.table_id or "").lower() for a in table_abstentions
-    )
+    has_table_abstention = len(table_abstentions) > 0
 
-    if not field_abstentions and not has_transaction_abstention:
+    if not field_abstentions and not has_table_abstention:
         remaining_abstentions.extend(table_abstentions)
         return resolved_fields, remaining_abstentions
 
-    if not has_transaction_abstention:
+    if not has_table_abstention:
         remaining_abstentions.extend(table_abstentions)
 
     # Build redaction config from tenant settings
@@ -834,6 +1124,7 @@ async def _vlm_fallback(
         page_texts = []
         try:
             import io as _io
+
             with pdfplumber.open(_io.BytesIO(pdf_content)) as pdf:
                 for page in pdf.pages:
                     page_text_raw = page.extract_text() or ""
@@ -972,10 +1263,12 @@ async def _vlm_fallback(
                         )
                     )
 
-        # If there are table abstentions (transactions not found by regex),
+        # If there are table abstentions (tables not found by regex),
         # run the two-phase transaction extraction
-        if has_transaction_abstention:
-            logger.info("vlm.transaction_extraction_triggered", job_id=job_id, total_pages=len(page_texts))
+        if has_table_abstention:
+            logger.info(
+                "vlm.transaction_extraction_triggered", job_id=job_id, total_pages=len(page_texts)
+            )
             txn_result = await extract_document_with_llm(
                 document_text=page_text,
                 vlm_client=ports.vlm_client,
@@ -984,7 +1277,9 @@ async def _vlm_fallback(
             )
             if txn_result and "accounts" in txn_result and txn_result["accounts"]:
                 provenance = Provenance(
-                    page=1, bbox=[0, 0, 0, 0], source="vlm",
+                    page=1,
+                    bbox=[0, 0, 0, 0],
+                    source="vlm",
                     extraction_rule="llm_two_phase_extraction",
                 )
                 resolved_fields["accounts"] = Field(
@@ -996,8 +1291,18 @@ async def _vlm_fallback(
                     provenance=provenance,
                 )
                 # Also capture metadata fields from the two-phase result
-                for key in ("institution", "client_name", "statement_date", "period_from", "period_to"):
-                    if key in txn_result and txn_result[key] is not None and key not in resolved_fields:
+                for key in (
+                    "institution",
+                    "client_name",
+                    "statement_date",
+                    "period_from",
+                    "period_to",
+                ):
+                    if (
+                        key in txn_result
+                        and txn_result[key] is not None
+                        and key not in resolved_fields
+                    ):
                         resolved_fields[key] = Field(
                             value=txn_result[key],
                             original_string=str(txn_result[key]),
@@ -1143,8 +1448,14 @@ def _flatten_llm_result(llm_result: dict) -> dict:
     flat: dict = {}
 
     # Top-level fields
-    for key in ("document_type", "statement_date", "period_from", "period_to",
-                "institution", "client_name"):
+    for key in (
+        "document_type",
+        "statement_date",
+        "period_from",
+        "period_to",
+        "institution",
+        "client_name",
+    ):
         if key in llm_result and llm_result[key] is not None:
             flat[key] = llm_result[key]
 
@@ -1152,17 +1463,21 @@ def _flatten_llm_result(llm_result: dict) -> dict:
     accounts = llm_result.get("accounts", [])
     if accounts and len(accounts) > 0:
         first_account = accounts[0]
-        for key in ("account_number", "iban", "currency", "account_type",
-                    "opening_balance", "closing_balance"):
+        for key in (
+            "account_number",
+            "iban",
+            "currency",
+            "account_type",
+            "opening_balance",
+            "closing_balance",
+        ):
             if key in first_account and first_account[key] is not None:
                 flat[key] = first_account[key]
 
     return flat
 
 
-def _build_redaction_config(
-    tenant: TenantContext, schema_type: str
-) -> list[EntityRedactionConfig]:
+def _build_redaction_config(tenant: TenantContext, schema_type: str) -> list[EntityRedactionConfig]:
     """Build the redaction config list from tenant settings.
 
     Uses per-schema override if available, otherwise global config.
@@ -1205,14 +1520,13 @@ def _render_page_image(page: Any) -> bytes:
     try:
         im = page.to_image(resolution=150)
         import io
+
         buf = io.BytesIO()
         im.save(buf, format="PNG")
         return buf.getvalue()
     except Exception:
         # Return minimal placeholder if rendering fails
         return b""
-
-
 
 
 def _increment_vlm_progress(progress) -> None:

@@ -1,12 +1,30 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import DataTable from "../components/DataTable";
 import JobStatusBadge from "../components/JobStatusBadge";
 import SchemaTypeTag from "../components/SchemaTypeTag";
 import ConfidenceBadge from "../components/ConfidenceBadge";
 import MonospaceField from "../components/MonospaceField";
+import { filterJobs } from "./filterJobs";
 
 const API_KEY = "demo-key";
+
+const SPINNER_WORDS = [
+  "Percolating", "Simmering", "Brewing", "Crystallizing", "Orchestrating",
+  "Deciphering", "Untangling", "Crunching", "Fermenting", "Distilling",
+  "Marinating", "Calibrating", "Synthesizing", "Unravelling", "Conjuring",
+  "Transmuting", "Harmonizing", "Incubating", "Cultivating", "Forging",
+  "Sculpting", "Weaving", "Assembling", "Composing", "Hatching",
+  "Germinating", "Cascading", "Coalescing", "Manifesting", "Channeling",
+  "Perusing", "Ruminating", "Contemplating", "Mulling", "Noodling",
+  "Tinkering", "Wrangling", "Spelunking", "Gallivanting", "Meandering",
+  "Zigzagging", "Whirring", "Churning", "Sprouting", "Unfurling",
+  "Concocting", "Finagling", "Bootstrapping", "Combobulating", "Vibing",
+];
+
+function getSpinnerWord() {
+  return SPINNER_WORDS[Math.floor(Math.random() * SPINNER_WORDS.length)];
+}
 
 export default function JobQueueScreen() {
   const navigate = useNavigate();
@@ -54,16 +72,28 @@ export default function JobQueueScreen() {
               }
               return job;
             }
-            // Job not found (server restarted) — don't include
-          } catch {}
-          return null;
+            // Job not found (server restarted) — keep in list with stale status
+            validIds.push(id);
+            const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
+            return {
+              job_id: id,
+              filename: jobFiles[id] || "Unknown file",
+              status: "unavailable",
+              created_at: null,
+            };
+          } catch {
+            // Network error — keep the job but mark as unavailable
+            validIds.push(id);
+            const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
+            return {
+              job_id: id,
+              filename: jobFiles[id] || "Unknown file",
+              status: "unavailable",
+              created_at: null,
+            };
+          }
         })
       );
-
-      // Clean up stale job IDs from sessionStorage
-      if (validIds.length !== stored.length) {
-        sessionStorage.setItem("pdf_jobs", JSON.stringify(validIds));
-      }
 
       setJobs(results.filter(Boolean));
       setLoading(false);
@@ -74,10 +104,9 @@ export default function JobQueueScreen() {
     return () => clearInterval(interval);
   }, []);
 
-  // Filter logic
-  const filteredJobs = jobs.filter((job) => {
-    if (statusFilter && job.status !== statusFilter) return false;
-    return true;
+  // Filter logic using extracted pure function
+  const filteredJobs = filterJobs(jobs, {
+    statuses: statusFilter ? [statusFilter] : [],
   });
 
   const handleCancel = async (e, jobId) => {
@@ -98,7 +127,8 @@ export default function JobQueueScreen() {
     setJobs(jobs.filter((j) => j.job_id !== jobId));
   };
 
-  const formatETA = (seconds) => {
+  const formatETA = (seconds, stage) => {
+    if (stage === "vlm") return "AI processing…";
     if (seconds == null) return "";
     if (seconds < 60) return `~${Math.ceil(seconds)}s`;
     return `~${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`;
@@ -109,10 +139,7 @@ export default function JobQueueScreen() {
       key: "filename",
       label: "Document",
       render: (val, row) => (
-        <div style={{ display: "flex", flexDirection: "column" }}>
-          <span style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{val || "Untitled"}</span>
-          <span style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)", fontFamily: "var(--font-mono)" }}>{row.job_id?.slice(0, 8)}</span>
-        </div>
+        <span style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{val || "Untitled"}</span>
       ),
     },
     {
@@ -137,12 +164,30 @@ export default function JobQueueScreen() {
         if (row.status !== "processing" || !prog) {
           return row.status === "complete" || row.status === "partial" ? "✓ Done" : "—";
         }
+
+        const spinnerWord = getSpinnerWord();
+        const stageLabels = {
+          uploading: "Ingesting...",
+          classifying: "Reading...",
+          extracting: "Extracting...",
+          vlm: `${spinnerWord}...`,
+          packaging: "Finalizing...",
+        };
+        const currentLabel = stageLabels[prog.current_stage] || `${spinnerWord}...`;
+
         return (
           <div style={styles.progressCell}>
+            {/* Current step label */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--color-info, #3498db)", marginBottom: 4 }}>
+              <span style={{ animation: "spin 1s linear infinite" }}>⟳</span>
+              <span>{currentLabel}</span>
+            </div>
+            {/* Progress bar + cancel */}
             <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
               <div style={{ ...styles.progressBar, flex: 1 }}>
                 <div style={{ ...styles.progressFill, width: `${prog.progress_percent || 0}%` }} />
               </div>
+              <span style={{ fontSize: "var(--text-xs)", color: "var(--color-text-muted)", minWidth: 28 }}>{prog.progress_percent}%</span>
               <button
                 onClick={(e) => handleCancel(e, row.job_id)}
                 style={styles.cancelBtn}
@@ -151,9 +196,12 @@ export default function JobQueueScreen() {
                 ✕
               </button>
             </div>
+            {/* Detail line */}
             <span style={styles.progressDetail}>
-              {prog.pages_processed}/{prog.total_pages} pages
-              {prog.estimated_remaining_seconds != null && ` · ${formatETA(prog.estimated_remaining_seconds)}`}
+              {prog.stage_detail || `${prog.pages_processed}/${prog.total_pages} pages`}
+              {prog.estimated_remaining_seconds != null
+                ? ` · ${formatETA(prog.estimated_remaining_seconds, prog.current_stage)}`
+                : ""}
             </span>
           </div>
         );

@@ -80,7 +80,38 @@ The VLM fallback requires AWS Bedrock access to Claude. You need:
 
 ## Quick Start
 
-### Backend
+### One-Command Setup
+
+```bash
+# Clone and setup everything
+git clone <repo-url>
+cd pdf-ingestion
+./setup.sh
+```
+
+Or using Make:
+```bash
+make setup
+```
+
+### Running the Application
+
+```bash
+# Terminal 1 — Backend (API on port 8000)
+make backend
+
+# Terminal 2 — Frontend (UI on port 3001)
+make frontend
+```
+
+Open http://localhost:3001 in your browser.
+
+### Manual Setup
+
+<details>
+<summary>Click to expand manual steps</summary>
+
+#### Backend
 
 ```bash
 cd pdf_ingestion
@@ -97,10 +128,10 @@ cp .env.example .env
 # Edit .env with your AWS credentials and settings
 
 # Run the server
-uvicorn api.main:app --port 8000
+uvicorn api.main:app --port 8000 --reload
 ```
 
-### Frontend
+#### Frontend
 
 ```bash
 cd pdf_ingestion/frontend
@@ -113,6 +144,8 @@ npm run dev
 ```
 
 Open http://localhost:3001 in your browser.
+
+</details>
 
 ## API Endpoints
 

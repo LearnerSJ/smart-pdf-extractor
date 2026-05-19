@@ -6,6 +6,7 @@ and returns the result. For demo purposes, processing is synchronous.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ async def submit_extraction(
     file: UploadFile = File(...),
     schema_type: str | None = Form(default=None),
     batch_id: str | None = Form(default=None),
+    force_reprocess: str | None = Form(default=None),
     tenant: TenantContext = Depends(resolve_tenant),
 ) -> APIResponse[JobResponse]:
     """Accept a PDF file and start extraction in the background.
@@ -87,7 +89,8 @@ async def submit_extraction(
 
     # Check dedup store for previously processed identical document
     dedup_store = getattr(request.app.state, "dedup_store", None)
-    if dedup_store:
+    should_force = force_reprocess and force_reprocess.lower() in ("true", "1", "yes")
+    if dedup_store and not should_force:
         existing_job = dedup_store.lookup(doc_hash)
         if existing_job:
             logger.info(
@@ -108,6 +111,9 @@ async def submit_extraction(
                     timestamp=now.isoformat(),
                 ),
             )
+    elif dedup_store and should_force:
+        # Remove stale hash so this submission is treated as fresh
+        dedup_store.remove(doc_hash)
 
     # Determine job priority based on file size
     file_size = len(file_bytes)
@@ -138,7 +144,6 @@ async def submit_extraction(
         pdf_store[job_id] = file_bytes
 
     # Launch background processing
-    import asyncio
     asyncio.create_task(_run_pipeline_background(
         job_id=job_id,
         file_bytes=file_bytes,
@@ -148,6 +153,7 @@ async def submit_extraction(
         tenant=tenant,
         trace_id=trace_id,
         schema_cache=getattr(request.app.state, "schema_cache", None),
+        dedup_store=dedup_store,
     ))
 
     return APIResponse[JobResponse](
@@ -173,6 +179,7 @@ async def _run_pipeline_background(
     tenant: "TenantContext",
     trace_id: str,
     schema_cache: "SchemaCache | None" = None,
+    dedup_store: object = None,
 ) -> None:
     """Run the extraction pipeline as a background task."""
     try:
@@ -244,6 +251,11 @@ async def _run_pipeline_background(
         completed_at = datetime.now(timezone.utc).isoformat()
         _JOBS[job_id]["status"] = status
         _JOBS[job_id]["completed_at"] = completed_at
+
+        # If the job failed, remove from dedup so the user can re-submit
+        if status == "failed":
+            if dedup_store:
+                dedup_store.remove(doc_hash)
 
         # Store result
         _RESULTS[job_id] = {

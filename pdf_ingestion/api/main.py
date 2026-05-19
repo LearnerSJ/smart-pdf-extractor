@@ -32,11 +32,13 @@ from api.routes.admin_usage import router as admin_usage_router
 from api.routes.admin_logs import router as admin_logs_router
 from api.routes.admin_alerts import router as admin_alerts_router
 from api.routes.schema_cache import router as schema_cache_router
+from api.routes.chat import router as chat_router
 
 # Alert engine and notification dispatcher
 from pipeline.alerts.engine import AlertEngine
 from pipeline.alerts.notifier import NotificationDispatcher
 from pipeline.discovery.schema_cache import SchemaCache
+from pipeline.discovery.pending_schema_store import PendingSchemaStore
 from pipeline.dedup_store import DedupStore
 
 # Self-healing feedback loops
@@ -111,6 +113,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── Schema Cache (auto-discovery) ────────────────────────────────────────
     app.state.schema_cache = SchemaCache()
+
+    # ── Pending Schema Store (user-approval gating) ───────────────────────────
+    app.state.pending_schema_store = PendingSchemaStore()
 
     # ── Dedup Store (persistent SHA-256 dedup) ───────────────────────────────
     app.state.dedup_store = DedupStore()
@@ -195,6 +200,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_logs_router)
     app.include_router(admin_alerts_router)
     app.include_router(schema_cache_router)
+    app.include_router(chat_router)
 
     return app
 

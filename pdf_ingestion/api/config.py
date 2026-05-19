@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     # AWS / Bedrock
     aws_region: str = "us-east-1"
+    aws_profile: str | None = None
     bedrock_model_id: str = "us.anthropic.claude-sonnet-4-6"
     bedrock_fallback_model_id: str | None = None  # e.g., "us.anthropic.claude-haiku-4"
     vlm_confidence_threshold: float = 0.80
@@ -30,9 +31,9 @@ class Settings(BaseSettings):
     # Chunked VLM extraction
     vlm_max_tokens_per_job: int = 100_000
     vlm_budget_exceeded_action: str = "flag"
-    vlm_window_size: int = 12
-    vlm_window_overlap: int = 3
-    vlm_max_concurrent_windows: int = 3
+    vlm_window_size: int = 15
+    vlm_window_overlap: int = 2
+    vlm_max_concurrent_windows: int = 8
 
     # File limits
     max_file_size_mb: int = 50
@@ -55,9 +56,10 @@ class Settings(BaseSettings):
     smtp_from: str = "alerts@pdf-ingestion.local"
 
     # Auto-Schema Discovery
+    discovery_enabled: bool = False
     discovery_sample_pages: int = 5
-    discovery_max_context_ratio: float = 0.80
-    discovery_cache_enabled: bool = True
+    discovery_max_sample_tokens: int = 15000
+    discovery_cache_ttl_days: int = 30
 
     # OCR Processing
     ocr_concurrency: int = 8

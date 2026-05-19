@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "predev": "lsof -ti :3000 | xargs kill -9 2>/dev/null || true",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest --run"
@@ -16,6 +17,7 @@
     "react-router-dom": "^6.30.3"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@vitejs/plugin-react": "^4.3.4",
