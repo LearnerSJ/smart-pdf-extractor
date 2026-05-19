@@ -20,6 +20,8 @@ Thumbs.db
 
 # PDFs - sample/test PDF files (not part of the codebase)
 PDF/
+*.pdf
+!pdf_ingestion/tests/fixtures/*.pdf
 
 # IDE
 .vscode/
@@ -34,3 +36,8 @@ test_all_pdfs.py
 # Build artifacts
 *.whl
 *.tar.gz
+
+
+# Log files
+*.log
+test_results.log

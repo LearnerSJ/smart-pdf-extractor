@@ -212,7 +212,6 @@ async def extract_document_with_llm(
             continue
         headers = tbl.get("headers", [])
         rows = tbl.get("rows", [])
-        table_type = tbl.get("table_type", "")
         norm_headers = _normalize_headers(headers)
 
         # Find existing table with same normalized headers

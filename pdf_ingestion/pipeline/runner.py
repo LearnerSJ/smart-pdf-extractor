@@ -34,7 +34,6 @@ from api.models.response import (
 from api.models.tenant import TenantContext
 from pipeline.assembler import assemble
 from pipeline.classifier import classify_page
-from pipeline.delivery import on_job_complete
 from pipeline.extractors.camelot_extractor import extract_tables_camelot
 from pipeline.extractors.digital import extract_digital_page
 from pipeline.ingestion import ingest, IngestionError
@@ -44,8 +43,6 @@ from pipeline.models import (
     EntityRedactionConfig,
     IngestedDocument,
     PageOutput,
-    Token,
-    VLMFieldResult,
 )
 from pipeline.packager import package_result
 from pipeline.ports import DeliveryPort, OCRClientPort, RedactorPort, VLMClientPort
@@ -288,7 +285,7 @@ async def process_document(
         )
 
     # ── Stage 5: Section Segmentation ───────────────────────────────────────
-    from pipeline.section_segmenter import segment_document, DocumentSection
+    from pipeline.section_segmenter import segment_document
 
     sections = segment_document(page_outputs)
 
