@@ -24,8 +24,11 @@ setup-frontend:
 
 # ─── Development ─────────────────────────────────────────────────────────────
 
+# AWS profile for Bedrock VLM calls. Override: make backend AWS_PROFILE=other
+AWS_PROFILE ?= smartstream
+
 backend:
-	cd pdf_ingestion && .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+	cd pdf_ingestion && AWS_PROFILE=$(AWS_PROFILE) .venv/bin/python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
 frontend:
 	cd pdf_ingestion/frontend && npm run dev

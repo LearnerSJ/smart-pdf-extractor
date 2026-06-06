@@ -186,15 +186,19 @@ async def _run_pipeline_background(
         from api.config import get_settings
         from pipeline.runner import PipelinePorts, process_document
         from pipeline.vlm.bedrock_client import BedrockVLMClient
+        from pipeline.extractors.paddle_native_ocr import PaddleNativeOCRClient
         from pipeline.extractors.tesseract_ocr import TesseractOCRClient
         from pipeline.extractors.ocr import PaddleOCRClient
         from tests.mocks import MockDeliveryClient, MockRedactor
 
         settings = get_settings()
 
-        # Use Tesseract locally, PaddleOCR in Docker
+        # OCR priority: PaddleOCR native > Tesseract > PaddleOCR HTTP (Docker)
+        paddle_native = PaddleNativeOCRClient()
         tesseract = TesseractOCRClient()
-        if tesseract.is_available():
+        if paddle_native.is_available():
+            ocr_client = paddle_native
+        elif tesseract.is_available():
             ocr_client = tesseract
         else:
             ocr_client = PaddleOCRClient(endpoint=settings.paddleocr_endpoint)

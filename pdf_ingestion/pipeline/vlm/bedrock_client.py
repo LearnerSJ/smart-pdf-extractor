@@ -17,6 +17,7 @@ import structlog
 from api.errors import ErrorCode
 from pipeline.models import VLMFieldResult
 from pipeline.ports import VLMClientPort
+from pipeline.vlm.response_parser import strip_markdown_fences
 
 logger = structlog.get_logger()
 
@@ -398,9 +399,10 @@ class BedrockVLMClient(VLMClientPort):
                 model_id=self._model_id,
             )
 
-        # For single-field extraction, parse the {"value": ..., "confidence": ...} response
+        # For single-field extraction, parse the {"value": ..., "confidence": ...} response.
+        # Claude often wraps JSON in ```json fences — strip them before parsing.
         try:
-            parsed = json.loads(extracted_text)
+            parsed = json.loads(strip_markdown_fences(extracted_text))
             value = parsed.get("value")
             confidence = float(parsed.get("confidence", 0.0))
         except (json.JSONDecodeError, TypeError, ValueError):

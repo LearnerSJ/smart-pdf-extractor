@@ -10,6 +10,8 @@ for dynamic schema detection and extraction.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import structlog
 
 from api.errors import ErrorCode
@@ -21,7 +23,13 @@ from pipeline.schemas.bank_statement import BankStatementExtractor
 from pipeline.schemas.base import BaseSchemaExtractor
 from pipeline.schemas.custody_statement import CustodyStatementExtractor
 from pipeline.schemas.swift_confirm import SwiftConfirmExtractor
+from pipeline.schemas.template_extractor import SchemaTemplate, TemplateExtractor
+from pipeline.schemas.template_store import TemplateStore, get_default_store
+from pipeline.schemas.themes import detect_theme
 from pipeline.vlm.token_budget import TokenBudget
+
+if TYPE_CHECKING:
+    from pipeline.discovery.schema_cache import SchemaCache
 
 logger = structlog.get_logger()
 
@@ -283,6 +291,7 @@ async def route_and_extract_async(
     schema_cache: "SchemaCache | None" = None,
     token_budget: TokenBudget | None = None,
     trace_id: str = "",
+    template_store: TemplateStore | None = None,
 ) -> tuple[str, dict]:
     """Route to the appropriate extractor and extract fields.
 
@@ -305,8 +314,10 @@ async def route_and_extract_async(
     """
     from pipeline.discovery.auto_discovery import AutoSchemaDiscovery
     from pipeline.discovery.dynamic_extractor import DynamicExtractor
-    from pipeline.discovery.schema_cache import SchemaCache
-    from pipeline.models import DiscoveredSchema
+    from pipeline.discovery.template_synthesis import synthesise_template
+
+    if template_store is None:
+        template_store = get_default_store()
 
     # Determine schema type
     if schema_type_hint and schema_type_hint != "unknown":
@@ -314,8 +325,27 @@ async def route_and_extract_async(
     else:
         schema_type = detect_schema(doc)
 
-    # Handle unknown schema — try auto-discovery if VLM enabled
+    # Handle unknown schema — template tier first, then auto-discovery
     if schema_type == "unknown":
+        tenant_id = tenant.id if tenant else "*"
+        theme = detect_theme(doc)
+        logger.info("theme.detected", theme=theme, trace_id=trace_id)
+
+        # ── Tier 1: deterministic template under the detected theme (no VLM) ──
+        if theme:
+            hit = await _try_theme_templates(doc, theme, template_store, tenant_id)
+            if hit is not None:
+                tmpl, result = hit
+                logger.info(
+                    "template.hit",
+                    fingerprint=tmpl.fingerprint_key,
+                    theme=theme,
+                    source=tmpl.source,
+                    trace_id=trace_id,
+                )
+                return f"template:{tmpl.fingerprint_key}", result
+
+        # ── Tier 2: VLM discovery, then learn + save a template for next time ──
         if tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
             discovery = AutoSchemaDiscovery(vlm_client, redactor, schema_cache)
             result = await discovery.discover(doc, tenant, token_budget, trace_id)
@@ -332,6 +362,18 @@ async def route_and_extract_async(
             extraction_result = await extractor.extract(
                 doc, result, tenant, token_budget, trace_id
             )
+
+            # Learn: synthesise a deterministic template so the next same-layout
+            # document skips VLM entirely (spec step 4).
+            if theme:
+                try:
+                    learned = synthesise_template(theme, result, extraction_result)
+                    await template_store.save(tenant_id, learned)
+                except Exception as e:  # synthesis is best-effort; never fail the job
+                    logger.warning(
+                        "template.synthesis_failed", error=str(e), trace_id=trace_id
+                    )
+
             return extraction_result.get("schema_type", f"discovered:{result.document_type_label}"), extraction_result
 
         # VLM not available — fall back to standard abstention
@@ -365,10 +407,62 @@ async def route_and_extract_async(
         }
 
     result = extractor_instance.extract(doc)
+
+    # If the built-in extractor produced an incomplete result (no fields, or any
+    # abstention — e.g. the section was mis-labelled by the segmenter), try the
+    # deterministic template tier before any VLM escalation downstream. A template
+    # only wins if it extracts cleanly (no abstentions), so this never degrades a
+    # good built-in result.
+    if not result.get("fields") or result.get("abstentions"):
+        if template_store is None:
+            template_store = get_default_store()
+        tenant_id = tenant.id if tenant else "*"
+        theme = detect_theme(doc)
+        if theme:
+            hit = await _try_theme_templates(doc, theme, template_store, tenant_id)
+            if hit is not None:
+                tmpl, tmpl_result = hit
+                logger.info(
+                    "template.hit",
+                    fingerprint=tmpl.fingerprint_key,
+                    theme=theme,
+                    source=tmpl.source,
+                    via="builtin_fallback",
+                    builtin_schema=schema_type,
+                    trace_id=trace_id,
+                )
+                return f"template:{tmpl.fingerprint_key}", tmpl_result
+
     return schema_type, result
 
 
 # ─── Private Helpers ──────────────────────────────────────────────────────────
+
+
+async def _try_theme_templates(
+    doc: AssembledDocument,
+    theme: str,
+    template_store: TemplateStore,
+    tenant_id: str,
+) -> tuple[SchemaTemplate, dict] | None:
+    """Run each template filed under the theme; return the best clean extraction.
+
+    A template "hits" when it extracts at least one field or table with no
+    abstentions. The result still passes through the downstream validation gate,
+    which escalates to VLM if the deterministic output is wrong.
+    """
+    templates = await template_store.find_in_theme(tenant_id, theme)
+    best: tuple[SchemaTemplate, dict] | None = None
+    best_score = 0
+    for tmpl in templates:
+        result = TemplateExtractor(tmpl).extract(doc)
+        if result["abstentions"]:
+            continue
+        score = len(result["fields"]) + len(result["tables"])
+        if score > best_score:
+            best_score = score
+            best = (tmpl, result)
+    return best
 
 
 def _apply_negative_penalty(

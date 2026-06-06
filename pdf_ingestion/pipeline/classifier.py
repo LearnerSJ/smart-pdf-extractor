@@ -11,8 +11,13 @@ import structlog
 
 logger = structlog.get_logger()
 
-# Classification threshold
-DIGITAL_THRESHOLD = 0.80
+# Classification threshold.
+# Coverage = glyph-bbox area / page area. Real digital text pages sit around
+# 0.02–0.15 (whitespace, margins, line spacing dominate); image-only scanned
+# pages have no native chars and score 0.0. A small epsilon cleanly separates
+# the two. The previous 0.80 misclassified virtually every digital page as
+# SCANNED, forcing needless OCR.
+DIGITAL_THRESHOLD = 0.01
 
 
 def classify_page(page) -> str:  # type: ignore[type-arg]

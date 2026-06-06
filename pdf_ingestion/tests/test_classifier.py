@@ -16,22 +16,29 @@ class MockPage:
 
 
 def test_classify_digital_page():
-    """Page with coverage >= 0.80 is classified as DIGITAL."""
-    # Create chars that cover 85% of the page
-    # Page is 100x100 = 10000 area
-    # Need chars covering 8500 area
+    """A page with real native text (coverage >= threshold) is DIGITAL.
+
+    Typical digital text pages have glyph-area coverage of only a few percent
+    (whitespace and margins dominate), so even a sparse-but-real text page must
+    classify DIGITAL.
+    """
+    # ~3% coverage — representative of a normal text page
     chars = [
-        {"x0": 0, "top": 0, "x1": 100, "bottom": 85, "text": "x"}
+        {"x0": 0, "top": 0, "x1": 100, "bottom": 3, "text": "x"}
     ]
     page = MockPage(width=100, height=100, chars=chars)
     assert classify_page(page) == "DIGITAL"
 
 
 def test_classify_scanned_page():
-    """Page with coverage < 0.80 is classified as SCANNED."""
-    # Create chars that cover 50% of the page
+    """An image-only (scanned) page has negligible native text → SCANNED.
+
+    Scanned pages carry no extractable glyphs; at most a thin stray amount well
+    below the threshold.
+    """
+    # 0.5% coverage — below DIGITAL_THRESHOLD, e.g. a stray artefact char
     chars = [
-        {"x0": 0, "top": 0, "x1": 100, "bottom": 50, "text": "x"}
+        {"x0": 0, "top": 0, "x1": 10, "bottom": 5, "text": "x"}
     ]
     page = MockPage(width=100, height=100, chars=chars)
     assert classify_page(page) == "SCANNED"
@@ -56,10 +63,13 @@ def test_coverage_computation():
 
 
 def test_coverage_at_threshold():
-    """Page with exactly 0.80 coverage is classified as DIGITAL."""
-    # Page 100x100 = 10000 area, chars covering 8000 area
+    """Page with coverage exactly at DIGITAL_THRESHOLD is classified as DIGITAL."""
+    from pipeline.classifier import DIGITAL_THRESHOLD
+
+    # chars covering exactly DIGITAL_THRESHOLD of a 100x100 page
+    height_at_threshold = 100 * DIGITAL_THRESHOLD
     chars = [
-        {"x0": 0, "top": 0, "x1": 100, "bottom": 80, "text": "x"}
+        {"x0": 0, "top": 0, "x1": 100, "bottom": height_at_threshold, "text": "x"}
     ]
     page = MockPage(width=100, height=100, chars=chars)
     assert classify_page(page) == "DIGITAL"
