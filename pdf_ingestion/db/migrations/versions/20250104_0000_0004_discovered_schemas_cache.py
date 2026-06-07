@@ -23,6 +23,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Migration 0003 created an earlier "discovered_schemas" shape; this migration
+    # is the canonical version. Drop the superseded table (and its dependent
+    # indexes) before recreating. Safe: the cache had no ORM model / persisted data.
+    op.execute("DROP TABLE IF EXISTS discovered_schemas CASCADE")
     op.create_table(
         "discovered_schemas",
         sa.Column(

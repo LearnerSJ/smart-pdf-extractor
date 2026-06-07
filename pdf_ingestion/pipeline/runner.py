@@ -19,6 +19,7 @@ import structlog
 
 if TYPE_CHECKING:
     from pipeline.discovery.schema_cache import SchemaCache
+    from pipeline.schemas.template_store import TemplateStore
 
 from api.config import Settings
 from api.errors import ErrorCode
@@ -192,6 +193,7 @@ async def process_document(
     job_id: str | None = None,
     dedup_lookup: Callable[[str], CachedResult | None] | None = None,
     schema_cache: "SchemaCache | None" = None,
+    template_store: "TemplateStore | None" = None,
 ) -> PipelineResult:
     """Process a single document through the full extraction pipeline.
 
@@ -414,6 +416,7 @@ async def process_document(
                 schema_cache=schema_cache,
                 token_budget=discovery_budget,
                 trace_id=trace_id,
+                template_store=template_store,
             )
         else:
             section_schema, section_result = route_and_extract(

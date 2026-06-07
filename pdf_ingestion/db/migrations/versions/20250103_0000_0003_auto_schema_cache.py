@@ -22,7 +22,7 @@ def upgrade() -> None:
     op.create_table(
         "discovered_schemas",
         sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("tenant_id", UUID(as_uuid=True), sa.ForeignKey("tenants.id"), nullable=False),
+        sa.Column("tenant_id", sa.Text(), sa.ForeignKey("tenants.id"), nullable=False),
         sa.Column("fingerprint_key", sa.String(512), nullable=False),
         sa.Column("institution", sa.String(256), nullable=False),
         sa.Column("document_type_label", sa.String(256), nullable=False),

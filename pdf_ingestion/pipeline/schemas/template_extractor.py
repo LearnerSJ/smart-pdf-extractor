@@ -10,7 +10,7 @@ prototype; the spec moves them to pipeline/models.py.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from api.models.response import Abstention, Field, Table
 from pipeline.models import AssembledDocument
@@ -101,6 +101,24 @@ class SchemaTemplate:
             self.fingerprint_key = make_fingerprint_key(
                 self.theme, self.institution, self.document_type_label
             )
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dict (for JSONB persistence)."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SchemaTemplate":
+        """Rebuild a SchemaTemplate (and its anchors) from a stored dict."""
+        return cls(
+            theme=data["theme"],
+            document_type_label=data["document_type_label"],
+            institution=data["institution"],
+            field_anchors=[TemplateFieldAnchor(**a) for a in data.get("field_anchors", [])],
+            table_anchors=[TemplateTableAnchor(**t) for t in data.get("table_anchors", [])],
+            source=data.get("source", "hand_authored"),
+            version=data.get("version", 1),
+            fingerprint_key=data.get("fingerprint_key", ""),
+        )
 
 
 # ─── Extractor ────────────────────────────────────────────────────────────────

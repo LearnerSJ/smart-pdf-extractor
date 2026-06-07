@@ -53,6 +53,50 @@ def get_result(job_id: str, tenant_id: str) -> dict | None:
     return None
 
 
+# ─── Durable persistence (dual-write to Postgres; best-effort) ────────────────
+
+
+async def _persist_job_create(*, job_id, tenant, trace_id, filename, doc_hash, schema_type) -> None:
+    """Persist a new job. Never let a DB error fail the request (cache still holds it)."""
+    try:
+        from db.job_repo import JobRepo
+
+        repo = JobRepo()
+        await repo.ensure_tenant(tenant.id, tenant.name, tenant.api_key_hash, tenant.vlm_enabled)
+        await repo.create_job(
+            job_id=job_id, tenant_id=tenant.id, trace_id=trace_id,
+            filename=filename, doc_hash=doc_hash, schema_type=schema_type,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("job.persist_create_failed", error=str(e), job_id=job_id)
+
+
+async def _persist_job_finish(job_id, tenant, status, output_dict) -> None:
+    """Persist final status + result. Best-effort."""
+    try:
+        from db.job_repo import JobRepo
+
+        repo = JobRepo()
+        await repo.set_status(job_id, tenant.id, status)
+        await repo.save_result(job_id, tenant.id, output_dict)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("job.persist_finish_failed", error=str(e), job_id=job_id)
+
+
+async def warm_job_cache() -> None:
+    """Reload persisted jobs + results into the in-memory caches on startup, so
+    the queue and results survive a restart."""
+    try:
+        from db.job_repo import JobRepo
+
+        jobs, results = await JobRepo().load_all()
+        _JOBS.update(jobs)
+        _RESULTS.update(results)
+        logger.info("job.cache_warmed", jobs=len(jobs), results=len(results))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("job.cache_warm_failed", error=str(e))
+
+
 @router.post("/v1/extract", status_code=202)
 async def submit_extraction(
     request: Request,
@@ -134,6 +178,13 @@ async def submit_extraction(
         "completed_at": None,
     }
 
+    # Durable dual-write: persist the job to Postgres (tenant-scoped). The
+    # in-memory _JOBS stays the fast read path; DB makes it survive restarts.
+    await _persist_job_create(
+        job_id=job_id, tenant=tenant, trace_id=trace_id,
+        filename=filename, doc_hash=doc_hash, schema_type=schema_type,
+    )
+
     # Store hash in dedup store for future lookups
     if dedup_store:
         dedup_store.store(doc_hash, job_id)
@@ -153,6 +204,7 @@ async def submit_extraction(
         tenant=tenant,
         trace_id=trace_id,
         schema_cache=getattr(request.app.state, "schema_cache", None),
+        template_store=getattr(request.app.state, "template_store", None),
         dedup_store=dedup_store,
     ))
 
@@ -179,6 +231,7 @@ async def _run_pipeline_background(
     tenant: "TenantContext",
     trace_id: str,
     schema_cache: "SchemaCache | None" = None,
+    template_store: object = None,
     dedup_store: object = None,
 ) -> None:
     """Run the extraction pipeline as a background task."""
@@ -224,6 +277,7 @@ async def _run_pipeline_background(
             schema_type_hint=schema_type,
             job_id=job_id,
             schema_cache=schema_cache,
+            template_store=template_store,
         )
 
         if pipeline_result.output is not None:
@@ -269,6 +323,9 @@ async def _run_pipeline_background(
             "output": output_dict,
         }
 
+        # Durable dual-write (tenant-scoped)
+        await _persist_job_finish(job_id, tenant, status, output_dict)
+
     except Exception as e:
         logger.error("extraction.error", error=str(e), job_id=job_id)
         _JOBS[job_id]["status"] = "failed"
@@ -280,3 +337,4 @@ async def _run_pipeline_background(
             "trace_id": trace_id,
             "output": {"error": str(e)},
         }
+        await _persist_job_finish(job_id, tenant, "failed", {"error": str(e)})

@@ -114,6 +114,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Schema Cache (auto-discovery) ────────────────────────────────────────
     app.state.schema_cache = SchemaCache()
 
+    # ── Template Store (deterministic reuse) — Postgres-backed, durable ───────
+    # Falls back to the in-memory seeded store if the DB is unreachable so the
+    # app still boots in environments without Postgres.
+    _ts_logger = structlog.get_logger()
+    try:
+        from pipeline.schemas.pg_template_store import PostgresTemplateStore
+
+        pg_store = PostgresTemplateStore()
+        await pg_store.ensure_seeded()
+        app.state.template_store = pg_store
+        _ts_logger.info("template_store.ready", backend="postgres")
+    except Exception as e:
+        from pipeline.schemas.template_store import get_default_store
+
+        app.state.template_store = get_default_store()
+        _ts_logger.warning("template_store.postgres_unavailable", error=str(e), backend="in_memory")
+
+    # ── Warm job/result caches from Postgres (survive restarts) ──────────────
+    from api.routes.extract import warm_job_cache
+
+    await warm_job_cache()
+
     # ── Pending Schema Store (user-approval gating) ───────────────────────────
     app.state.pending_schema_store = PendingSchemaStore()
 
