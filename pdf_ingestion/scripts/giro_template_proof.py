@@ -13,7 +13,7 @@ import sys
 
 import pdfplumber
 
-from pipeline.models import AssembledDocument
+from pipeline.models import AssembledDocument, Token
 from pipeline.schemas.template_extractor import (
     SchemaTemplate,
     TemplateExtractor,
@@ -29,17 +29,21 @@ def build_assembled_document(pdf_path: str) -> AssembledDocument:
     """Digital-path assembly: pdfplumber words -> blocks, tables -> tables."""
     blocks: list[dict] = []
     tables: list[dict] = []
+    tokens: list[Token] = []
     table_counter = 0
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
             for w in page.extract_words():
+                bbox = (float(w["x0"]), float(w["top"]),
+                        float(w["x1"]), float(w["bottom"]))
                 blocks.append({
                     "text": w["text"],
-                    "bbox": [float(w["x0"]), float(w["top"]),
-                             float(w["x1"]), float(w["bottom"])],
+                    "bbox": list(bbox),
                     "provenance": {"page": page_num},
                 })
+                # Word-level token stream so VLM verification can ground values.
+                tokens.append(Token(text=w["text"], bbox=bbox, confidence=1.0))
             for t in page.extract_tables():
                 if not t:
                     continue
@@ -55,7 +59,7 @@ def build_assembled_document(pdf_path: str) -> AssembledDocument:
                 })
                 table_counter += 1
 
-    return AssembledDocument(blocks=blocks, tables=tables)
+    return AssembledDocument(blocks=blocks, tables=tables, token_stream=tokens)
 
 
 def validate(doc, fields: dict, tables: list, template: SchemaTemplate) -> list[str]:
