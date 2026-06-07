@@ -309,9 +309,13 @@ class BedrockVLMClient(VLMClientPort):
         """
         client = self._get_client()
 
+        # Discovery extraction builds its own prompt (flat-dict / table JSON shape)
+        # and passes it as page_text — pass it through verbatim, don't re-wrap.
+        is_discovery = field_name == "discovered_fields" or field_name.startswith("table_")
+
         # For full extraction, page_text IS the prompt (from llm_extractor.py)
         # For single-field extraction, we build a prompt around the page_text
-        if field_name in (
+        if is_discovery or field_name in (
             "full_extraction",
             "metadata_extraction",
             "transaction_extraction",
@@ -336,7 +340,9 @@ class BedrockVLMClient(VLMClientPort):
         # Use higher token limit for extraction calls (metadata is small, transactions need more)
         if field_name in ("full_extraction", "transaction_extraction", "chunked_extraction"):
             max_tokens = 32768  # dense transaction tables with many rows need large output
-        elif field_name in ("metadata_extraction", "page_summary"):
+        elif field_name.startswith("table_"):
+            max_tokens = 32768  # discovered table extraction — many rows
+        elif field_name in ("metadata_extraction", "page_summary", "discovered_fields"):
             max_tokens = 2048
         else:
             max_tokens = 256
@@ -384,8 +390,8 @@ class BedrockVLMClient(VLMClientPort):
                 break
 
         # For extraction calls, return the raw JSON text as the value
-        # (llm_extractor.py will parse it)
-        if field_name in (
+        # (llm_extractor.py / dynamic_extractor.py will parse it)
+        if is_discovery or field_name in (
             "full_extraction",
             "metadata_extraction",
             "transaction_extraction",

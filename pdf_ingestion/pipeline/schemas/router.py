@@ -363,12 +363,23 @@ async def route_and_extract_async(
                 doc, result, tenant, token_budget, trace_id
             )
 
-            # Learn: synthesise a deterministic template so the next same-layout
-            # document skips VLM entirely (spec step 4).
+            # Learn: synthesise a self-verified template so the next same-layout
+            # document skips VLM entirely (spec step 4). Only saved if it
+            # reproduces the VLM's own values on this document.
             if theme:
                 try:
-                    learned = synthesise_template(theme, result, extraction_result)
-                    await template_store.save(tenant_id, learned)
+                    learned = synthesise_template(theme, result, extraction_result, doc)
+                    if learned is not None:
+                        await template_store.save(tenant_id, learned)
+                        logger.info(
+                            "template.learned",
+                            fingerprint=learned.fingerprint_key,
+                            fields=len(learned.field_anchors),
+                            tables=len(learned.table_anchors),
+                            trace_id=trace_id,
+                        )
+                    else:
+                        logger.info("template.not_learned_unverified", trace_id=trace_id)
                 except Exception as e:  # synthesis is best-effort; never fail the job
                     logger.warning(
                         "template.synthesis_failed", error=str(e), trace_id=trace_id

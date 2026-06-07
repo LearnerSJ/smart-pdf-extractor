@@ -94,28 +94,38 @@ class JobRepo:
             await s.commit()
 
     async def load_all(self) -> tuple[dict, dict]:
-        """Load every job + latest result into _JOBS / _RESULTS shaped dicts (cache warm)."""
+        """Load every job + latest result into _JOBS / _RESULTS shaped dicts (cache warm).
+
+        RLS-aware: jobs/results are tenant-scoped, so a tenant must be bound per
+        query or the policy returns zero rows. Iterate every tenant (the tenants
+        table is not RLS-protected) and union their visible rows.
+        """
         jobs: dict[str, dict] = {}
         results: dict[str, dict] = {}
         async with async_session_factory() as s:
-            jrows = (await s.execute(
-                text("SELECT id, tenant_id, trace_id, filename, doc_hash, schema_type, "
-                     "status, created_at, completed_at FROM jobs")
-            )).mappings().all()
-            for r in jrows:
-                jid = str(r["id"])
-                jobs[jid] = {
-                    "job_id": jid, "tenant_id": r["tenant_id"], "trace_id": r["trace_id"],
-                    "filename": r["filename"], "doc_hash": r["doc_hash"],
-                    "schema_type": r["schema_type"], "status": r["status"],
-                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-                    "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
-                }
-            rrows = (await s.execute(
-                text("SELECT DISTINCT ON (job_id) job_id, tenant_id, output "
-                     "FROM results ORDER BY job_id, created_at DESC")
-            )).mappings().all()
-            for r in rrows:
-                jid = str(r["job_id"])
-                results[jid] = {"job_id": jid, "tenant_id": r["tenant_id"], "output": r["output"]}
+            tenant_ids = [
+                r[0] for r in (await s.execute(text("SELECT id FROM tenants"))).all()
+            ]
+            for tid in tenant_ids:
+                await _set_tenant(s, tid)
+                jrows = (await s.execute(
+                    text("SELECT id, tenant_id, trace_id, filename, doc_hash, schema_type, "
+                         "status, created_at, completed_at FROM jobs")
+                )).mappings().all()
+                for r in jrows:
+                    jid = str(r["id"])
+                    jobs[jid] = {
+                        "job_id": jid, "tenant_id": r["tenant_id"], "trace_id": r["trace_id"],
+                        "filename": r["filename"], "doc_hash": r["doc_hash"],
+                        "schema_type": r["schema_type"], "status": r["status"],
+                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                        "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+                    }
+                rrows = (await s.execute(
+                    text("SELECT DISTINCT ON (job_id) job_id, tenant_id, output "
+                         "FROM results ORDER BY job_id, created_at DESC")
+                )).mappings().all()
+                for r in rrows:
+                    jid = str(r["job_id"])
+                    results[jid] = {"job_id": jid, "tenant_id": r["tenant_id"], "output": r["output"]}
         return jobs, results
