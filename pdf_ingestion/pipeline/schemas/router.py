@@ -22,6 +22,11 @@ from pipeline.ports import VLMClientPort, RedactorPort
 from pipeline.schemas.bank_statement import BankStatementExtractor
 from pipeline.schemas.base import BaseSchemaExtractor
 from pipeline.schemas.custody_statement import CustodyStatementExtractor
+from pipeline.schemas.learn_lock import (
+    LearnLock,
+    compute_layout_signature,
+    get_default_learn_lock,
+)
 from pipeline.schemas.swift_confirm import SwiftConfirmExtractor
 from pipeline.schemas.template_extractor import SchemaTemplate, TemplateExtractor
 from pipeline.schemas.template_store import TemplateStore, get_default_store
@@ -292,6 +297,7 @@ async def route_and_extract_async(
     token_budget: TokenBudget | None = None,
     trace_id: str = "",
     template_store: TemplateStore | None = None,
+    learn_lock: LearnLock | None = None,
 ) -> tuple[str, dict]:
     """Route to the appropriate extractor and extract fields.
 
@@ -312,12 +318,10 @@ async def route_and_extract_async(
         Tuple of (schema_type, extraction_result_dict).
         If schema is unknown, returns an abstention result.
     """
-    from pipeline.discovery.auto_discovery import AutoSchemaDiscovery
-    from pipeline.discovery.dynamic_extractor import DynamicExtractor
-    from pipeline.discovery.template_synthesis import synthesise_template
-
     if template_store is None:
         template_store = get_default_store()
+    if learn_lock is None:
+        learn_lock = get_default_learn_lock()
 
     # Determine schema type
     if schema_type_hint and schema_type_hint != "unknown":
@@ -347,45 +351,28 @@ async def route_and_extract_async(
 
         # ── Tier 2: VLM discovery, then learn + save a template for next time ──
         if tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
-            discovery = AutoSchemaDiscovery(vlm_client, redactor, schema_cache)
-            result = await discovery.discover(doc, tenant, token_budget, trace_id)
-
-            if isinstance(result, Abstention):
-                return "unknown", {
-                    "fields": {},
-                    "tables": [],
-                    "abstentions": [result],
-                }
-
-            # Discovery succeeded — extract using discovered schema
-            extractor = DynamicExtractor(vlm_client, redactor)
-            extraction_result = await extractor.extract(
-                doc, result, tenant, token_budget, trace_id
-            )
-
-            # Learn: synthesise a self-verified template so the next same-layout
-            # document skips VLM entirely (spec step 4). Only saved if it
-            # reproduces the VLM's own values on this document.
-            if theme:
-                try:
-                    learned = synthesise_template(theme, result, extraction_result, doc)
-                    if learned is not None:
-                        await template_store.save(tenant_id, learned)
+            # Learn-lock: serialise identical layouts so a batch of N never-seen
+            # docs triggers ONE VLM discovery, not N. Waiters double-check the
+            # store on acquire and reuse the freshly-learned template (zero VLM).
+            signature = compute_layout_signature(doc, theme)
+            async with learn_lock.guard(tenant_id, signature):
+                if theme:
+                    hit = await _try_theme_templates(doc, theme, template_store, tenant_id)
+                    if hit is not None:
+                        tmpl, result = hit
                         logger.info(
-                            "template.learned",
-                            fingerprint=learned.fingerprint_key,
-                            fields=len(learned.field_anchors),
-                            tables=len(learned.table_anchors),
+                            "template.hit",
+                            fingerprint=tmpl.fingerprint_key,
+                            theme=theme,
+                            source=tmpl.source,
+                            via="learn_lock_double_check",
                             trace_id=trace_id,
                         )
-                    else:
-                        logger.info("template.not_learned_unverified", trace_id=trace_id)
-                except Exception as e:  # synthesis is best-effort; never fail the job
-                    logger.warning(
-                        "template.synthesis_failed", error=str(e), trace_id=trace_id
-                    )
-
-            return extraction_result.get("schema_type", f"discovered:{result.document_type_label}"), extraction_result
+                        return f"template:{tmpl.fingerprint_key}", result
+                return await _discover_and_learn(
+                    doc, theme, tenant, vlm_client, redactor, schema_cache,
+                    token_budget, trace_id, template_store, tenant_id,
+                )
 
         # VLM not available — fall back to standard abstention
         abstention = Abstention(
@@ -448,6 +435,59 @@ async def route_and_extract_async(
 
 
 # ─── Private Helpers ──────────────────────────────────────────────────────────
+
+
+async def _discover_and_learn(
+    doc: AssembledDocument,
+    theme: str | None,
+    tenant: TenantContext,
+    vlm_client: VLMClientPort,
+    redactor: RedactorPort,
+    schema_cache: "SchemaCache",
+    token_budget: TokenBudget,
+    trace_id: str,
+    template_store: TemplateStore,
+    tenant_id: str,
+) -> tuple[str, dict]:
+    """VLM discovery + extraction, then synthesise & save a self-verified template.
+
+    Runs under the learn-lock (one caller per layout at a time). Synthesis is
+    best-effort — a failure never fails the extraction.
+    """
+    from pipeline.discovery.auto_discovery import AutoSchemaDiscovery
+    from pipeline.discovery.dynamic_extractor import DynamicExtractor
+    from pipeline.discovery.template_synthesis import synthesise_template
+
+    discovery = AutoSchemaDiscovery(vlm_client, redactor, schema_cache)
+    result = await discovery.discover(doc, tenant, token_budget, trace_id)
+
+    if isinstance(result, Abstention):
+        return "unknown", {"fields": {}, "tables": [], "abstentions": [result]}
+
+    extractor = DynamicExtractor(vlm_client, redactor)
+    extraction_result = await extractor.extract(doc, result, tenant, token_budget, trace_id)
+
+    if theme:
+        try:
+            learned = synthesise_template(theme, result, extraction_result, doc)
+            if learned is not None:
+                await template_store.save(tenant_id, learned)
+                logger.info(
+                    "template.learned",
+                    fingerprint=learned.fingerprint_key,
+                    fields=len(learned.field_anchors),
+                    tables=len(learned.table_anchors),
+                    trace_id=trace_id,
+                )
+            else:
+                logger.info("template.not_learned_unverified", trace_id=trace_id)
+        except Exception as e:  # synthesis is best-effort; never fail the job
+            logger.warning("template.synthesis_failed", error=str(e), trace_id=trace_id)
+
+    return (
+        extraction_result.get("schema_type", f"discovered:{result.document_type_label}"),
+        extraction_result,
+    )
 
 
 async def _try_theme_templates(
