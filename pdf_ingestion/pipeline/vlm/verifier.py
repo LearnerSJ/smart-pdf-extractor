@@ -103,9 +103,16 @@ def verify_vlm_result(
         )
         return match
 
-    # Final fallback: check if the value appears as a substring in the full document text
+    # Final fallback: check if the value appears as a substring in the full document text.
+    # Tokens may be word-level (OCR) or character-level (digital pdfplumber chars), so a
+    # space-joined stream won't contain multi-word/char values. Collapse ALL whitespace on
+    # both sides so grounding is independent of token granularity.
     full_text = " ".join(_normalise_for_comparison(t.text) for t in token_stream if t.text)
-    if normalised_value in full_text:
+    full_text_collapsed = _collapse_whitespace(full_text)
+    value_collapsed = _collapse_whitespace(normalised_value)
+    if (normalised_value in full_text) or (
+        value_collapsed and value_collapsed in full_text_collapsed
+    ):
         logger.info(
             "vlm.verified",
             outcome="verified",
@@ -188,3 +195,13 @@ def _normalise_for_comparison(value: str) -> str:
     if not value:
         return ""
     return value.strip().lower()
+
+
+def _collapse_whitespace(value: str) -> str:
+    """Remove all internal whitespace so comparison is token-granularity agnostic.
+
+    Digital extraction yields character-level tokens and OCR yields word-level
+    tokens; collapsing whitespace lets a multi-word/char value be grounded in
+    either stream.
+    """
+    return "".join(value.split())

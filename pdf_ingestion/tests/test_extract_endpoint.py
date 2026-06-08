@@ -46,7 +46,8 @@ def test_extract_returns_202_with_job_response(client):
     )
     assert response.status_code == 202
     body = response.json()
-    assert body["data"]["status"] == "processing"
+    # "queued" when the durable queue accepts it; "processing" on in-process fallback.
+    assert body["data"]["status"] in ("queued", "processing")
     assert "job_id" in body["data"]
     assert "trace_id" in body["data"]
     assert body["meta"]["request_id"] == body["data"]["trace_id"]

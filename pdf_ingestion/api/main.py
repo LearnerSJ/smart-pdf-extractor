@@ -22,6 +22,7 @@ from api.routes.extract import router as extract_router
 from api.routes.feedback import router as feedback_router
 from api.routes.health import router as health_router
 from api.routes.jobs import router as jobs_router
+from api.routes.review import router as review_router
 from api.routes.results import router as results_router
 from api.routes.tenants import router as tenants_router
 
@@ -114,6 +115,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Schema Cache (auto-discovery) ────────────────────────────────────────
     app.state.schema_cache = SchemaCache()
 
+    # ── Template Store (deterministic reuse) — Postgres-backed, durable ───────
+    # Falls back to the in-memory seeded store if the DB is unreachable so the
+    # app still boots in environments without Postgres.
+    _ts_logger = structlog.get_logger()
+    try:
+        from pipeline.schemas.pg_template_store import PostgresTemplateStore
+
+        pg_store = PostgresTemplateStore()
+        await pg_store.ensure_seeded()
+        app.state.template_store = pg_store
+        _ts_logger.info("template_store.ready", backend="postgres")
+    except Exception as e:
+        from pipeline.schemas.template_store import get_default_store
+
+        app.state.template_store = get_default_store()
+        _ts_logger.warning("template_store.postgres_unavailable", error=str(e), backend="in_memory")
+
+    # ── Warm job/result caches from Postgres (survive restarts) ──────────────
+    from api.routes.extract import warm_job_cache
+
+    await warm_job_cache()
+
     # ── Pending Schema Store (user-approval gating) ───────────────────────────
     app.state.pending_schema_store = PendingSchemaStore()
 
@@ -139,6 +162,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await alert_engine.start(interval_seconds=settings.alert_evaluation_interval_seconds)
     app.state.alert_engine = alert_engine
 
+    # ── Durable job worker pool ──────────────────────────────────────────────
+    # Drains the Postgres-backed queue; reclaims jobs from crashed workers.
+    from api.worker import JobWorkerPool
+
+    worker_pool = JobWorkerPool(
+        template_store=app.state.template_store,
+        schema_cache=app.state.schema_cache,
+        n_workers=settings.queue_worker_count,
+    )
+    await worker_pool.start()
+    app.state.worker_pool = worker_pool
+
     logger = structlog.get_logger()
     logger.info("app.startup", settings_loaded=True)
 
@@ -147,6 +182,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger = structlog.get_logger()
     logger.info("app.shutdown", draining=True)
+
+    # Stop the worker pool first so no new jobs are claimed during drain.
+    if getattr(app.state, "worker_pool", None) is not None:
+        await app.state.worker_pool.stop()
 
     # Stop pattern miner before draining requests
     if hasattr(app.state, "pattern_miner") and app.state.pattern_miner is not None:
@@ -192,6 +231,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(batches_router)
     app.include_router(tenants_router)
     app.include_router(feedback_router)
+    app.include_router(review_router)
 
     # Admin dashboard routers (prefixed /v1/admin/ in their modules)
     app.include_router(admin_auth_router)

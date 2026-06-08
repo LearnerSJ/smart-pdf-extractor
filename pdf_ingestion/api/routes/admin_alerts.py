@@ -16,7 +16,7 @@ from typing import Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 from api.middleware.rbac import Permission, require_permission
 from api.models.response import APIResponse, ResponseMeta
@@ -32,7 +32,7 @@ class AlertRuleCreate(BaseModel):
     """Request body for creating an alert rule."""
 
     name: str
-    rule_type: Literal["budget", "error_rate", "circuit_breaker"]
+    rule_type: Literal["budget", "error_rate", "circuit_breaker", "abstention_rate"]
     tenant_id: str | None = None
     config: dict
     notification_channel: Literal["webhook", "email"]
@@ -246,6 +246,22 @@ def _validate_rule_config(rule_type: str, config: dict) -> list[str]:
             service_name = config["service_name"]
             if not isinstance(service_name, str) or not service_name.strip():
                 errors.append("config.service_name must be a non-empty string")
+
+    elif rule_type == "abstention_rate":
+        # Drift detector: % of completed jobs flagged for review in a window.
+        if "threshold_percent" not in config:
+            errors.append("config.threshold_percent is required for abstention_rate rules")
+        else:
+            threshold = config["threshold_percent"]
+            if not isinstance(threshold, (int, float)) or threshold < 0 or threshold > 100:
+                errors.append("config.threshold_percent must be a float between 0 and 100")
+
+        if "evaluation_window_minutes" not in config:
+            errors.append("config.evaluation_window_minutes is required for abstention_rate rules")
+        else:
+            window = config["evaluation_window_minutes"]
+            if not isinstance(window, int) or window <= 0:
+                errors.append("config.evaluation_window_minutes must be a positive integer")
 
     return errors
 

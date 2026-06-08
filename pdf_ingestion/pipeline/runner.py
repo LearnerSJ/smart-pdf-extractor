@@ -19,6 +19,7 @@ import structlog
 
 if TYPE_CHECKING:
     from pipeline.discovery.schema_cache import SchemaCache
+    from pipeline.schemas.template_store import TemplateStore
 
 from api.config import Settings
 from api.errors import ErrorCode
@@ -80,6 +81,107 @@ class PipelineResult:
     error_code: str | None = None
 
 
+def _table_is_clean(table: dict) -> bool:
+    """A pdfplumber table is confident enough to skip camelot triangulation when
+    it has real headers, at least one data row, and every row matches the header
+    column count. Ragged/headerless tables still get camelot cross-check.
+    """
+    headers = table.get("headers") or []
+    rows = table.get("rows") or []
+    if len(headers) < 2 or not rows:
+        return False
+    ncols = len(headers)
+    return all(isinstance(r, list) and len(r) == ncols for r in rows)
+
+
+def _classify_and_extract_digital(content: bytes, progress: Any) -> tuple:
+    """First pass (classify + digital extract + table triangulation + scanned-page
+    render), run in a worker thread so the API event loop stays responsive.
+
+    pdfplumber is not thread-safe across threads, but running the whole pass inside
+    a single worker thread is fine. Camelot is invoked only when a pdfplumber table
+    needs verification (present and not already clean) — skipping it entirely on the
+    many pages where pdfplumber is already confident or has no tables.
+
+    Returns: (page_data, digital_outputs, scanned_pages, pages_digital,
+              pages_scanned, total_pdf_pages).
+    """
+    import io
+
+    page_data: list[tuple[int, str]] = []
+    digital_outputs: dict[int, PageOutput] = {}
+    scanned_pages: list[tuple[int, bytes]] = []
+    pages_digital = 0
+    pages_scanned = 0
+
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        total_pdf_pages = len(pdf.pages)
+        if progress:
+            progress.total_pages = total_pdf_pages
+            progress.current_stage = "classifying"
+            progress.stage_detail = f"Classifying {total_pdf_pages} pages"
+
+        for page_num, page in enumerate(pdf.pages, start=1):
+            classification = classify_page(page)
+            page_data.append((page_num, classification))
+
+            if classification == "DIGITAL":
+                pages_digital += 1
+                page_output = extract_digital_page(page, page_num)
+
+                # Only triangulate tables that aren't already clean — and only
+                # pay for camelot (which re-parses the page) when needed.
+                unclean = [t for t in page_output.tables if not _table_is_clean(t)]
+                if unclean:
+                    camelot_tables = extract_tables_camelot(content, page_num)
+                    for i, pdfplumber_table in enumerate(page_output.tables):
+                        if _table_is_clean(pdfplumber_table):
+                            pdfplumber_table["triangulation"] = {
+                                "score": 0.0,
+                                "verdict": "agreement",
+                                "winner": "pdfplumber",
+                                "methods": ["pdfplumber"],
+                            }
+                            continue
+                        if i < len(camelot_tables):
+                            tri_result = triangulate_table(
+                                pdfplumber_table,
+                                camelot_tables[i],
+                                job_id="",
+                                tenant_id="",
+                            )
+                            pdfplumber_table["triangulation"] = {
+                                "score": tri_result.disagreement_score,
+                                "verdict": tri_result.verdict,
+                                "winner": tri_result.winner,
+                                "methods": tri_result.methods,
+                            }
+                else:
+                    # All tables clean (or none) — mark agreement, skip camelot.
+                    for pdfplumber_table in page_output.tables:
+                        pdfplumber_table["triangulation"] = {
+                            "score": 0.0,
+                            "verdict": "agreement",
+                            "winner": "pdfplumber",
+                            "methods": ["pdfplumber"],
+                        }
+
+                digital_outputs[page_num] = page_output
+            else:
+                pages_scanned += 1
+                page_image = _render_page_image(page)
+                scanned_pages.append((page_num, page_image))
+
+    return (
+        page_data,
+        digital_outputs,
+        scanned_pages,
+        pages_digital,
+        pages_scanned,
+        total_pdf_pages,
+    )
+
+
 async def process_document(
     file_bytes: bytes,
     filename: str,
@@ -91,6 +193,7 @@ async def process_document(
     job_id: str | None = None,
     dedup_lookup: Callable[[str], CachedResult | None] | None = None,
     schema_cache: "SchemaCache | None" = None,
+    template_store: "TemplateStore | None" = None,
 ) -> PipelineResult:
     """Process a single document through the full extraction pipeline.
 
@@ -155,119 +258,83 @@ async def process_document(
     pages_scanned = 0
 
     try:
-        import io
         import asyncio
 
-        with pdfplumber.open(io.BytesIO(doc.content)) as pdf:
-            # First pass: classify all pages and extract digital pages synchronously
-            # (pdfplumber is not thread-safe, so we do this in the main thread)
-            page_data: list[tuple[int, str, Any]] = []  # (page_num, classification, page)
-            digital_outputs: dict[int, PageOutput] = {}
-            scanned_pages: list[tuple[int, bytes]] = []  # (page_num, image_bytes)
+        # First pass (classify + digital extract + triangulation + scanned render)
+        # runs in a worker thread so the API event loop stays responsive on large
+        # documents. pdfplumber stays confined to that single thread.
+        (
+            page_data,
+            digital_outputs,
+            scanned_pages,
+            pages_digital,
+            pages_scanned,
+            total_pdf_pages,
+        ) = await asyncio.to_thread(_classify_and_extract_digital, doc.content, progress)
 
-            total_pdf_pages = len(pdf.pages)
+        # Second pass: OCR scanned pages in parallel
+        if progress:
+            progress.current_stage = "extracting"
+            progress.stage_detail = f"OCR on {len(scanned_pages)} scanned pages"
+            progress.pages_classified = len(page_data)
+            # Digital pages are already "done"
+            progress.pages_ocr_complete = pages_digital
+
+        async def _ocr_page(page_num: int, page_image: bytes) -> tuple[int, PageOutput]:
+            import time as _time
+
+            _start = _time.time()
+            tokens = await asyncio.to_thread(ports.ocr_client.extract_tokens, page_image)
             if progress:
-                progress.total_pages = total_pdf_pages
-                progress.current_stage = "classifying"
-                progress.stage_detail = f"Classifying {total_pdf_pages} pages"
-
-            for page_num, page in enumerate(pdf.pages, start=1):
-                classification = classify_page(page)
-                page_data.append((page_num, classification, page))
-
-                if classification == "DIGITAL":
-                    pages_digital += 1
-                    page_output = extract_digital_page(page, page_num)
-
-                    # Camelot extraction for triangulation
-                    camelot_tables = extract_tables_camelot(doc.content, page_num)
-
-                    # ── Stage 4: Triangulation ───────────────────────────────
-                    for i, pdfplumber_table in enumerate(page_output.tables):
-                        if i < len(camelot_tables):
-                            tri_result = triangulate_table(
-                                pdfplumber_table,
-                                camelot_tables[i],
-                                job_id=job_id,
-                                tenant_id=tenant.id,
-                            )
-                            pdfplumber_table["triangulation"] = {
-                                "score": tri_result.disagreement_score,
-                                "verdict": tri_result.verdict,
-                                "winner": tri_result.winner,
-                                "methods": tri_result.methods,
-                            }
-
-                    digital_outputs[page_num] = page_output
-                else:
-                    pages_scanned += 1
-                    # Render page image for OCR (must happen while pdf is open)
-                    page_image = _render_page_image(page)
-                    scanned_pages.append((page_num, page_image))
-
-            # Second pass: OCR scanned pages in parallel
-            if progress:
-                progress.current_stage = "extracting"
-                progress.stage_detail = f"OCR on {len(scanned_pages)} scanned pages"
-                progress.pages_classified = len(page_data)
-                # Digital pages are already "done"
-                progress.pages_ocr_complete = pages_digital
-
-            async def _ocr_page(page_num: int, page_image: bytes) -> tuple[int, PageOutput]:
-                import time as _time
-
-                _start = _time.time()
-                tokens = await asyncio.to_thread(ports.ocr_client.extract_tokens, page_image)
-                if progress:
-                    elapsed_ms = (_time.time() - _start) * 1000
-                    progress.record_page_complete(elapsed_ms)
-                page_output = PageOutput(
-                    page_number=page_num,
-                    classification="SCANNED",
-                    tokens=tokens,
-                    tables=[],
-                    text_blocks=[
-                        {
-                            "text": t.text,
+                elapsed_ms = (_time.time() - _start) * 1000
+                progress.record_page_complete(elapsed_ms)
+            page_output = PageOutput(
+                page_number=page_num,
+                classification="SCANNED",
+                tokens=tokens,
+                tables=[],
+                text_blocks=[
+                    {
+                        "text": t.text,
+                        "bbox": list(t.bbox),
+                        "provenance": {
+                            "page": page_num,
                             "bbox": list(t.bbox),
-                            "provenance": {
-                                "page": page_num,
-                                "bbox": list(t.bbox),
-                                "source": "ocr",
-                                "extraction_rule": "paddleocr",
-                            },
-                        }
-                        for t in tokens
-                    ],
-                )
-                return page_num, page_output
+                            "source": "ocr",
+                            "extraction_rule": "paddleocr",
+                        },
+                    }
+                    for t in tokens
+                ],
+            )
+            return page_num, page_output
 
-            # Run OCR concurrently (limit concurrency to avoid overwhelming resources)
-            ocr_semaphore = asyncio.Semaphore(settings.ocr_concurrency)
+        # Run OCR concurrently (limit concurrency to avoid overwhelming resources)
+        ocr_semaphore = asyncio.Semaphore(settings.ocr_concurrency)
 
-            async def _ocr_with_semaphore(
-                page_num: int, page_image: bytes
-            ) -> tuple[int, PageOutput]:
-                async with ocr_semaphore:
-                    return await _ocr_page(page_num, page_image)
+        async def _ocr_with_semaphore(
+            page_num: int, page_image: bytes
+        ) -> tuple[int, PageOutput]:
+            async with ocr_semaphore:
+                return await _ocr_page(page_num, page_image)
 
-            if scanned_pages:
-                ocr_tasks = [
-                    _ocr_with_semaphore(page_num, image) for page_num, image in scanned_pages
-                ]
-                ocr_results = await asyncio.gather(*ocr_tasks)
-                scanned_outputs: dict[int, PageOutput] = {
-                    page_num: output for page_num, output in ocr_results
-                }
+        if scanned_pages:
+            ocr_tasks = [
+                _ocr_with_semaphore(page_num, image) for page_num, image in scanned_pages
+            ]
+            ocr_results = await asyncio.gather(*ocr_tasks)
+            scanned_outputs: dict[int, PageOutput] = {
+                page_num: output for page_num, output in ocr_results
+            }
+        else:
+            scanned_outputs = {}
+
+        # Assemble page_outputs in original page order
+        for page_num, classification in page_data:
+            if classification == "DIGITAL":
+                page_outputs.append(digital_outputs[page_num])
             else:
-                scanned_outputs = {}
-
-            # Assemble page_outputs in original page order
-            for page_num, classification, _ in page_data:
-                if classification == "DIGITAL":
-                    page_outputs.append(digital_outputs[page_num])
-                else:
-                    page_outputs.append(scanned_outputs[page_num])
+                page_outputs.append(scanned_outputs[page_num])
 
     except Exception as e:
         logger.error("extraction.error", code="ERR_EXTRACT_003", message=str(e))
@@ -349,6 +416,7 @@ async def process_document(
                 schema_cache=schema_cache,
                 token_budget=discovery_budget,
                 trace_id=trace_id,
+                template_store=template_store,
             )
         else:
             section_schema, section_result = route_and_extract(

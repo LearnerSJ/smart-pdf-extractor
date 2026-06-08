@@ -21,7 +21,6 @@ from pipeline.models import (
     DiscoveredSchema,
     DiscoveredTableDefinition,
     DiscoverySample,
-    SchemaFingerprint,
 )
 from pipeline.ports import VLMClientPort, RedactorPort
 from pipeline.vlm.response_parser import strip_markdown_fences
@@ -186,8 +185,10 @@ class AutoSchemaDiscovery:
         output_tokens = self._vlm.estimate_tokens(vlm_result.raw_response) if vlm_result.raw_response else 0
         token_budget.record_usage(input_tokens=input_tokens, output_tokens=output_tokens)
 
-        # Step 6: Parse response
-        schema = self._parse_schema_response(vlm_result.raw_response if vlm_result.value is None else vlm_result.value)
+        # Step 6: Parse response. Always parse from raw_response — it carries the
+        # full envelope, which _parse_schema_response unwraps; vlm_result.value may
+        # be a stringified dict for structured (discovery) responses.
+        schema = self._parse_schema_response(vlm_result.raw_response)
 
         if schema is None:
             logger.warning(
@@ -291,6 +292,12 @@ class AutoSchemaDiscovery:
     def _parse_schema_response(self, raw_response: str | None) -> DiscoveredSchema | None:
         """Parse VLM JSON response into a DiscoveredSchema.
 
+        Tolerant of three response shapes the VLM emits:
+          1. a bare schema object,
+          2. a ```json-fenced object,
+          3. a {"value": {...}} envelope, and/or the full Bedrock response
+             ({"content": [{"type": "text", "text": "..."}]}).
+
         Returns None if response is null, empty, or malformed JSON.
         """
         if not raw_response:
@@ -300,6 +307,22 @@ class AutoSchemaDiscovery:
             data = json.loads(strip_markdown_fences(raw_response))
         except (json.JSONDecodeError, TypeError):
             return None
+
+        # Unwrap the full Bedrock response envelope → inner text → JSON.
+        if isinstance(data, dict) and isinstance(data.get("content"), list):
+            text = ""
+            for block in data["content"]:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    break
+            try:
+                data = json.loads(strip_markdown_fences(text))
+            except (json.JSONDecodeError, TypeError):
+                return None
+
+        # Unwrap the {"value": {...}} extraction envelope.
+        if isinstance(data, dict) and isinstance(data.get("value"), dict):
+            data = data["value"]
 
         if not isinstance(data, dict):
             return None

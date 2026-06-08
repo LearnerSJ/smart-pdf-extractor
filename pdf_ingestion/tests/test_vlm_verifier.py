@@ -59,6 +59,26 @@ class TestVerifyVLMResult:
         assert outcome.verified is False
         assert outcome.reason == ErrorCode.VLM_VALUE_UNVERIFIABLE
 
+    def test_multiword_value_grounds_in_char_level_tokens(self) -> None:
+        """Digital extraction emits character-level tokens; a multi-word value must
+        still ground via the whitespace-collapsed substring fallback. Regression for
+        VLM verification rejecting correct values on digital docs (ERR_VLM_004)."""
+        result = VLMFieldResult(
+            value="AVIVA LTD-NON PAR 2",
+            confidence=0.9,
+            raw_response="",
+            model_id="test-model",
+        )
+        # One Token per character, as pdfplumber page.chars produces.
+        text = "Account AVIVA LTD-NON PAR 2 SGD"
+        tokens = [
+            Token(text=ch, bbox=(float(i), 0.0, float(i) + 1, 10.0), confidence=1.0)
+            for i, ch in enumerate(text)
+        ]
+
+        outcome = verify_vlm_result(result, tokens)
+        assert outcome.verified is True
+
     def test_fuzzy_match_above_threshold(self) -> None:
         """Similar value above threshold should be verified."""
         result = VLMFieldResult(

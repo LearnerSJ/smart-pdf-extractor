@@ -24,6 +24,7 @@ from api.models.tenant import TenantContext
 from pipeline.models import (
     AssembledDocument,
     DiscoveredSchema,
+    DiscoveredTableDefinition,
     EntityRedactionConfig as PipelineRedactionConfig,
     VLMFieldResult,
 )
@@ -183,8 +184,10 @@ class DynamicExtractor:
         output_tokens = self._vlm.estimate_tokens(vlm_result.raw_response) if vlm_result.raw_response else 0
         token_budget.record_usage(input_tokens=input_tokens, output_tokens=output_tokens)
 
-        # Parse VLM response as JSON with field values
-        extracted_values = self._parse_field_response(vlm_result.raw_response)
+        # Parse VLM response as JSON with field values.
+        # vlm_result.value holds the model's text output (flat-dict JSON);
+        # raw_response is the full Bedrock envelope, which must NOT be parsed here.
+        extracted_values = self._parse_field_response(vlm_result.value)
 
         # Verify each field against token stream
         for field_def in schema.metadata_fields:
@@ -278,8 +281,8 @@ class DynamicExtractor:
             output_tokens = self._vlm.estimate_tokens(vlm_result.raw_response) if vlm_result.raw_response else 0
             token_budget.record_usage(input_tokens=input_tokens, output_tokens=output_tokens)
 
-            # Parse table response
-            table = self._parse_table_response(vlm_result.raw_response, table_def)
+            # Parse table response (vlm_result.value = model text, not envelope)
+            table = self._parse_table_response(vlm_result.value, table_def)
             if table is not None:
                 results.append(table)
             else:
@@ -327,11 +330,9 @@ DOCUMENT TEXT:
         self,
         schema: DiscoveredSchema,
         page_text: str,
-        table_def: "DiscoveredTableDefinition",
+        table_def: DiscoveredTableDefinition,
     ) -> str:
         """Build table extraction prompt using discovered headers."""
-        from pipeline.models import DiscoveredTableDefinition  # noqa: F811
-
         headers_str = ", ".join(table_def.expected_headers)
 
         return f"""Extract the table "{table_def.table_type}" from this {schema.document_type_label} document.
@@ -385,10 +386,8 @@ DOCUMENT TEXT:
         return {}
 
     @staticmethod
-    def _parse_table_response(raw_response: str | None, table_def: "DiscoveredTableDefinition") -> Table | None:
+    def _parse_table_response(raw_response: str | None, table_def: DiscoveredTableDefinition) -> Table | None:
         """Parse VLM table extraction response into a Table model."""
-        from pipeline.models import DiscoveredTableDefinition  # noqa: F811
-
         if not raw_response:
             return None
 

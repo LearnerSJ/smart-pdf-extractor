@@ -14,10 +14,14 @@ from datetime import datetime, timezone
 import structlog
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from pydantic import BaseModel
+from typing import TYPE_CHECKING
 
 from api.middleware.auth import resolve_tenant
 from api.models.response import APIResponse, ResponseMeta
 from api.models.tenant import TenantContext
+
+if TYPE_CHECKING:
+    from pipeline.discovery.schema_cache import SchemaCache
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -51,6 +55,65 @@ def get_result(job_id: str, tenant_id: str) -> dict | None:
     if result and result.get("tenant_id") == tenant_id:
         return result
     return None
+
+
+# ─── Durable persistence (dual-write to Postgres; best-effort) ────────────────
+
+
+async def _persist_job_create(*, job_id, tenant, trace_id, filename, doc_hash, schema_type) -> None:
+    """Persist a new job. Never let a DB error fail the request (cache still holds it)."""
+    try:
+        from db.job_repo import JobRepo
+
+        repo = JobRepo()
+        await repo.ensure_tenant(tenant.id, tenant.name, tenant.api_key_hash, tenant.vlm_enabled)
+        await repo.create_job(
+            job_id=job_id, tenant_id=tenant.id, trace_id=trace_id,
+            filename=filename, doc_hash=doc_hash, schema_type=schema_type,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("job.persist_create_failed", error=str(e), job_id=job_id)
+
+
+async def _enqueue_job(*, job_id, tenant, file_bytes, filename, doc_hash, schema_type) -> bool:
+    """Persist payload + mark job queued for the durable worker. Returns success."""
+    try:
+        from db.job_queue import JobQueue
+
+        await JobQueue().enqueue(
+            job_id=job_id, tenant_id=tenant.id, content=file_bytes,
+            filename=filename, doc_hash=doc_hash, schema_type=schema_type,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("queue.enqueue_failed", error=str(e), job_id=job_id)
+        return False
+
+
+async def _persist_job_finish(job_id, tenant, status, output_dict) -> None:
+    """Persist final status + result. Best-effort."""
+    try:
+        from db.job_repo import JobRepo
+
+        repo = JobRepo()
+        await repo.set_status(job_id, tenant.id, status)
+        await repo.save_result(job_id, tenant.id, output_dict)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("job.persist_finish_failed", error=str(e), job_id=job_id)
+
+
+async def warm_job_cache() -> None:
+    """Reload persisted jobs + results into the in-memory caches on startup, so
+    the queue and results survive a restart."""
+    try:
+        from db.job_repo import JobRepo
+
+        jobs, results = await JobRepo().load_all()
+        _JOBS.update(jobs)
+        _RESULTS.update(results)
+        logger.info("job.cache_warmed", jobs=len(jobs), results=len(results))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("job.cache_warm_failed", error=str(e))
 
 
 @router.post("/v1/extract", status_code=202)
@@ -134,6 +197,13 @@ async def submit_extraction(
         "completed_at": None,
     }
 
+    # Durable dual-write: persist the job to Postgres (tenant-scoped). The
+    # in-memory _JOBS stays the fast read path; DB makes it survive restarts.
+    await _persist_job_create(
+        job_id=job_id, tenant=tenant, trace_id=trace_id,
+        filename=filename, doc_hash=doc_hash, schema_type=schema_type,
+    )
+
     # Store hash in dedup store for future lookups
     if dedup_store:
         dedup_store.store(doc_hash, job_id)
@@ -143,24 +213,34 @@ async def submit_extraction(
     if pdf_store is not None:
         pdf_store[job_id] = file_bytes
 
-    # Launch background processing
-    asyncio.create_task(_run_pipeline_background(
-        job_id=job_id,
-        file_bytes=file_bytes,
-        filename=filename,
-        doc_hash=doc_hash,
-        schema_type=schema_type,
-        tenant=tenant,
-        trace_id=trace_id,
-        schema_cache=getattr(request.app.state, "schema_cache", None),
-        dedup_store=dedup_store,
-    ))
+    # Durable enqueue: persist the payload and mark the job queued so a worker
+    # picks it up. The job survives a crash and is reclaimed (migration 0007).
+    # If the queue is unreachable, fall back to in-process processing so the
+    # system still works without the database.
+    queued = await _enqueue_job(
+        job_id=job_id, tenant=tenant, file_bytes=file_bytes,
+        filename=filename, doc_hash=doc_hash, schema_type=schema_type,
+    )
+    if not queued:
+        logger.warning("queue.enqueue_failed_fallback_inprocess", job_id=job_id)
+        asyncio.create_task(_run_pipeline_background(
+            job_id=job_id,
+            file_bytes=file_bytes,
+            filename=filename,
+            doc_hash=doc_hash,
+            schema_type=schema_type,
+            tenant=tenant,
+            trace_id=trace_id,
+            schema_cache=getattr(request.app.state, "schema_cache", None),
+            template_store=getattr(request.app.state, "template_store", None),
+            dedup_store=dedup_store,
+        ))
 
     return APIResponse[JobResponse](
         data=JobResponse(
             job_id=job_id,
             trace_id=trace_id,
-            status="processing",
+            status="queued" if queued else "processing",
             result=None,
         ),
         meta=ResponseMeta(
@@ -168,6 +248,112 @@ async def submit_extraction(
             timestamp=now.isoformat(),
         ),
     )
+
+
+async def execute_pipeline(
+    *,
+    job_id: str,
+    file_bytes: bytes,
+    filename: str,
+    doc_hash: str,
+    schema_type: str | None,
+    tenant: "TenantContext",
+    trace_id: str,
+    schema_cache: "SchemaCache | None" = None,
+    template_store: object = None,
+) -> tuple[str, dict, list]:
+    """Run the extraction pipeline and shape the result.
+
+    Pure execution: builds ports, runs process_document, returns
+    (status, output_dict, abstentions). Raises on infrastructure errors so the
+    caller (worker) can decide whether to retry. Used by both the durable worker
+    and the in-process fallback.
+    """
+    from api.config import get_settings
+    from pipeline.runner import PipelinePorts, process_document
+    from pipeline.vlm.bedrock_client import BedrockVLMClient
+    from pipeline.extractors.paddle_native_ocr import PaddleNativeOCRClient
+    from pipeline.extractors.tesseract_ocr import TesseractOCRClient
+    from pipeline.extractors.ocr import PaddleOCRClient
+    from tests.mocks import MockDeliveryClient, MockRedactor
+
+    settings = get_settings()
+
+    # OCR priority: PaddleOCR native > Tesseract > PaddleOCR HTTP (Docker)
+    paddle_native = PaddleNativeOCRClient()
+    tesseract = TesseractOCRClient()
+    if paddle_native.is_available():
+        ocr_client = paddle_native
+    elif tesseract.is_available():
+        ocr_client = tesseract
+    else:
+        ocr_client = PaddleOCRClient(endpoint=settings.paddleocr_endpoint)
+
+    ports = PipelinePorts(
+        vlm_client=BedrockVLMClient(
+            region=settings.aws_region,
+            model_id=settings.bedrock_model_id,
+            vlm_enabled=tenant.vlm_enabled,
+        ),
+        ocr_client=ocr_client,
+        redactor=MockRedactor(),
+        delivery_client=MockDeliveryClient(),
+    )
+
+    pipeline_result = await process_document(
+        file_bytes=file_bytes,
+        filename=filename,
+        tenant=tenant,
+        settings=settings,
+        ports=ports,
+        trace_id=trace_id,
+        schema_type_hint=schema_type,
+        job_id=job_id,
+        schema_cache=schema_cache,
+        template_store=template_store,
+    )
+
+    abstentions: list = []
+    if pipeline_result.output is not None:
+        output_dict = pipeline_result.output.model_dump()
+        status = pipeline_result.output.status
+        abstentions = list(pipeline_result.output.abstentions)
+        # Self-healing: record abstentions for pattern mining.
+        from api.main import app as _app
+        pattern_miner = getattr(_app.state, "pattern_miner", None)
+        if pattern_miner:
+            for abstention in pipeline_result.output.abstentions:
+                pattern_miner.record_failure(
+                    job_id=job_id,
+                    tenant_id=tenant.id,
+                    schema_type=pipeline_result.output.schema_type or "unknown",
+                    error_code=abstention.reason,
+                    field_name=abstention.field,
+                    institution=None,
+                )
+    elif pipeline_result.cached:
+        output_dict = {"cached": True, "doc_hash": doc_hash}
+        status = "complete"
+    else:
+        output_dict = {"error": pipeline_result.error, "error_code": pipeline_result.error_code}
+        status = "failed"
+
+    return status, output_dict, abstentions
+
+
+def record_job_result(
+    *, job_id: str, tenant_id: str, trace_id: str, status: str, output_dict: dict
+) -> None:
+    """Update the in-memory read caches with a finished job's status + result."""
+    if job_id in _JOBS:
+        _JOBS[job_id]["status"] = status
+        _JOBS[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _RESULTS[job_id] = {
+        "job_id": job_id,
+        "tenant_id": tenant_id,
+        "trace_id": trace_id,
+        "output": output_dict,
+    }
 
 
 async def _run_pipeline_background(
@@ -179,100 +365,27 @@ async def _run_pipeline_background(
     tenant: "TenantContext",
     trace_id: str,
     schema_cache: "SchemaCache | None" = None,
+    template_store: object = None,
     dedup_store: object = None,
 ) -> None:
-    """Run the extraction pipeline as a background task."""
+    """In-process fallback path (used when the durable queue can't be reached)."""
     try:
-        from api.config import get_settings
-        from pipeline.runner import PipelinePorts, process_document
-        from pipeline.vlm.bedrock_client import BedrockVLMClient
-        from pipeline.extractors.tesseract_ocr import TesseractOCRClient
-        from pipeline.extractors.ocr import PaddleOCRClient
-        from tests.mocks import MockDeliveryClient, MockRedactor
-
-        settings = get_settings()
-
-        # Use Tesseract locally, PaddleOCR in Docker
-        tesseract = TesseractOCRClient()
-        if tesseract.is_available():
-            ocr_client = tesseract
-        else:
-            ocr_client = PaddleOCRClient(endpoint=settings.paddleocr_endpoint)
-
-        ports = PipelinePorts(
-            vlm_client=BedrockVLMClient(
-                region=settings.aws_region,
-                model_id=settings.bedrock_model_id,
-                vlm_enabled=tenant.vlm_enabled,
-            ),
-            ocr_client=ocr_client,
-            redactor=MockRedactor(),
-            delivery_client=MockDeliveryClient(),
+        status, output_dict, _ = await execute_pipeline(
+            job_id=job_id, file_bytes=file_bytes, filename=filename, doc_hash=doc_hash,
+            schema_type=schema_type, tenant=tenant, trace_id=trace_id,
+            schema_cache=schema_cache, template_store=template_store,
         )
-
-        pipeline_result = await process_document(
-            file_bytes=file_bytes,
-            filename=filename,
-            tenant=tenant,
-            settings=settings,
-            ports=ports,
-            trace_id=trace_id,
-            schema_type_hint=schema_type,
-            job_id=job_id,
-            schema_cache=schema_cache,
+        if status == "failed" and dedup_store:
+            dedup_store.remove(doc_hash)
+        record_job_result(
+            job_id=job_id, tenant_id=tenant.id, trace_id=trace_id,
+            status=status, output_dict=output_dict,
         )
-
-        if pipeline_result.output is not None:
-            output_dict = pipeline_result.output.model_dump()
-            status = pipeline_result.output.status
-        elif pipeline_result.cached:
-            output_dict = {"cached": True, "doc_hash": doc_hash}
-            status = "complete"
-        else:
-            output_dict = {"error": pipeline_result.error, "error_code": pipeline_result.error_code}
-            status = "failed"
-
-        # ── Self-Healing: Record failures for pattern mining ─────────────────
-        from api.main import app as _app
-        pattern_miner = getattr(_app.state, "pattern_miner", None)
-
-        if pipeline_result.output and pattern_miner:
-            for abstention in pipeline_result.output.abstentions:
-                pattern_miner.record_failure(
-                    job_id=job_id,
-                    tenant_id=tenant.id,
-                    schema_type=pipeline_result.output.schema_type or "unknown",
-                    error_code=abstention.reason,
-                    field_name=abstention.field,
-                    institution=None,
-                )
-
-        # Update job status
-        completed_at = datetime.now(timezone.utc).isoformat()
-        _JOBS[job_id]["status"] = status
-        _JOBS[job_id]["completed_at"] = completed_at
-
-        # If the job failed, remove from dedup so the user can re-submit
-        if status == "failed":
-            if dedup_store:
-                dedup_store.remove(doc_hash)
-
-        # Store result
-        _RESULTS[job_id] = {
-            "job_id": job_id,
-            "tenant_id": tenant.id,
-            "trace_id": trace_id,
-            "output": output_dict,
-        }
-
+        await _persist_job_finish(job_id, tenant, status, output_dict)
     except Exception as e:
         logger.error("extraction.error", error=str(e), job_id=job_id)
-        _JOBS[job_id]["status"] = "failed"
-        _JOBS[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
-
-        _RESULTS[job_id] = {
-            "job_id": job_id,
-            "tenant_id": tenant.id,
-            "trace_id": trace_id,
-            "output": {"error": str(e)},
-        }
+        record_job_result(
+            job_id=job_id, tenant_id=tenant.id, trace_id=trace_id,
+            status="failed", output_dict={"error": str(e)},
+        )
+        await _persist_job_finish(job_id, tenant, "failed", {"error": str(e)})

@@ -166,6 +166,8 @@ class AlertEngine:
                     await self.evaluate_budget_rule(rule)
                 elif rule_type == "error_rate":
                     await self.evaluate_error_rate_rule(rule)
+                elif rule_type == "abstention_rate":
+                    await self.evaluate_abstention_rate_rule(rule)
                 # circuit_breaker rules are event-driven, not polled
             except Exception as exc:
                 logger.error(
@@ -360,6 +362,56 @@ class AlertEngine:
                     to_state="resolved",
                     threshold_percent=threshold_percent,
                     actual_percent=round(error_rate, 2),
+                )
+
+    async def evaluate_abstention_rate_rule(self, rule: dict) -> None:
+        """Evaluate a drift rule: % of completed jobs flagged for review in a window.
+
+        Reads REAL job data from Postgres (unlike budget/error_rate which use the
+        demo in-memory stores). A rising abstention rate means a layout has
+        drifted or a new one is appearing — the signal to re-learn templates.
+        """
+        from db.job_repo import JobRepo
+
+        config = rule.get("config", {})
+        threshold_percent = config.get("threshold_percent", 0.0)
+        window_minutes = config.get("evaluation_window_minutes", 60)
+        tenant_id = rule.get("tenant_id")
+
+        try:
+            total, flagged = await JobRepo().abstention_stats(window_minutes, tenant_id)
+        except Exception as exc:  # noqa: BLE001 — DB hiccup shouldn't crash the loop
+            logger.warning("alert_engine.abstention_query_failed", error=str(exc))
+            return
+
+        rate = (flagged / total * 100) if total else 0.0
+        current_state = rule.get("state", "idle")
+        context = {
+            "threshold_percent": threshold_percent,
+            "actual_percent": round(rate, 2),
+            "total_jobs": total,
+            "flagged_jobs": flagged,
+            "window_minutes": window_minutes,
+            "tenant_id": tenant_id,
+        }
+
+        if total > 0 and rate > threshold_percent:
+            if current_state != "firing":
+                rule["state"] = "firing"
+                await self._emit_notification(rule=rule, event_type="firing", context=context)
+                logger.info(
+                    "alert_engine.state_transition", rule_id=rule.get("id"),
+                    from_state=current_state, to_state="firing",
+                    threshold_percent=threshold_percent, actual_percent=round(rate, 2),
+                )
+        else:
+            if current_state == "firing":
+                rule["state"] = "resolved"
+                await self._emit_notification(rule=rule, event_type="resolved", context=context)
+                logger.info(
+                    "alert_engine.state_transition", rule_id=rule.get("id"),
+                    from_state="firing", to_state="resolved",
+                    threshold_percent=threshold_percent, actual_percent=round(rate, 2),
                 )
 
     async def handle_circuit_breaker_event(self, event: dict) -> None:
