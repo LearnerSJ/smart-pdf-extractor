@@ -45,17 +45,40 @@ class PostgresTemplateStore:
         return SchemaTemplate.from_dict(_as_dict(row[0]))
 
     async def find_in_theme(self, tenant_id: str, theme: str) -> list[SchemaTemplate]:
-        """All templates filed under a theme (tenant-specific + global)."""
+        """All templates under a theme (tenant-specific + global), minus any this
+        tenant has quarantined — so a corrected/drifted layout re-learns."""
         sql = text(
             """
-            SELECT template_json FROM schema_templates
-            WHERE theme = :theme AND tenant_id IN (:tid, '*')
+            SELECT template_json FROM schema_templates t
+            WHERE t.theme = :theme AND t.tenant_id IN (:tid, '*')
+              AND t.fingerprint_key NOT IN (
+                  SELECT fingerprint_key FROM template_quarantine WHERE tenant_id = :tid
+              )
             """
         )
         async with async_session_factory() as session:
             await _set_tenant(session, tenant_id)
             rows = (await session.execute(sql, {"theme": theme, "tid": tenant_id})).all()
         return [SchemaTemplate.from_dict(_as_dict(r[0])) for r in rows]
+
+    async def quarantine(self, tenant_id: str, fingerprint_key: str, reason: str) -> None:
+        """Shadow a fingerprint for this tenant so its next same-layout doc re-learns."""
+        async with async_session_factory() as session:
+            await _set_tenant(session, tenant_id)
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO template_quarantine (tenant_id, fingerprint_key, reason)
+                    VALUES (:tid, :fk, :reason)
+                    ON CONFLICT (tenant_id, fingerprint_key)
+                    DO UPDATE SET reason = EXCLUDED.reason, created_at = NOW()
+                    """
+                ),
+                {"tid": tenant_id, "fk": fingerprint_key, "reason": reason[:1000]},
+            )
+            await session.commit()
+        logger.info("template.quarantined", fingerprint=fingerprint_key,
+                    tenant_id=tenant_id, reason=reason[:200], backend="postgres")
 
     async def save(self, tenant_id: str, template: SchemaTemplate) -> None:
         """Upsert a template for a tenant, bumping version on overwrite."""
@@ -102,6 +125,14 @@ class PostgresTemplateStore:
                     "source": template.source,
                     "version": template.version,
                 },
+            )
+            # A freshly learned/saved template is trusted again — lift any quarantine.
+            await session.execute(
+                text(
+                    "DELETE FROM template_quarantine "
+                    "WHERE tenant_id = :tid AND fingerprint_key = :fk"
+                ),
+                {"tid": tenant_id, "fk": template.fingerprint_key},
             )
             await session.commit()
         logger.info(

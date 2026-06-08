@@ -116,6 +116,11 @@ async def submit_correction(
         feedback_id=feedback_id,
     )
 
+    # Learning loop: if this job was extracted by a TEMPLATE, the correction means
+    # that layout has drifted — quarantine the template for this tenant so its next
+    # same-layout document re-learns via VLM (self-verifying synthesis). Best-effort.
+    await _quarantine_if_template(request, job_id, tenant, payload.field_name)
+
     return APIResponse[FeedbackResponse](
         data=FeedbackResponse(
             feedback_id=str(feedback_id),
@@ -128,6 +133,32 @@ async def submit_correction(
             timestamp=now.isoformat(),
         ),
     )
+
+
+async def _quarantine_if_template(
+    request: Request, job_id: str, tenant: TenantContext, field_name: str
+) -> None:
+    """Quarantine the template that produced this job, if any (drift -> re-learn)."""
+    try:
+        from db.job_repo import JobRepo
+
+        schema_type = await JobRepo().get_result_schema_type(job_id, tenant.id)
+        if not schema_type or not schema_type.startswith("template:"):
+            return  # not a template extraction — nothing to re-learn
+        fingerprint_key = schema_type.split("template:", 1)[1]
+        store = getattr(request.app.state, "template_store", None)
+        if store is None or not hasattr(store, "quarantine"):
+            return
+        await store.quarantine(
+            tenant.id, fingerprint_key, reason=f"correction:{field_name}"
+        )
+        logger.info(
+            "template.quarantined_by_feedback",
+            job_id=job_id, tenant_id=tenant.id,
+            fingerprint=fingerprint_key, field_name=field_name,
+        )
+    except Exception as e:  # never fail the feedback request over this
+        logger.warning("feedback.quarantine_failed", job_id=job_id, error=str(e))
 
 
 @router.get("/v1/feedback")
