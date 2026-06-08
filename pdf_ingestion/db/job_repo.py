@@ -138,6 +138,22 @@ class JobRepo:
                     flagged += int(row[1] or 0)
         return total, flagged
 
+    async def get_result_schema_type(self, job_id: str, tenant_id: str) -> str | None:
+        """The schema_type recorded in a job's latest result (e.g. 'template:...')."""
+        async with async_session_factory() as s:
+            await _set_tenant(s, tenant_id)
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT output->>'schema_type' FROM results "
+                        "WHERE job_id = :jid AND tenant_id = :tid "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ),
+                    {"jid": uuid.UUID(job_id), "tid": tenant_id},
+                )
+            ).first()
+        return row[0] if row else None
+
     async def list_needs_review(self, tenant_id: str, limit: int = 100) -> list[dict]:
         """Jobs flagged for human review (had abstentions), newest first.
 

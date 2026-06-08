@@ -60,6 +60,8 @@ class TemplateStore:
     def __init__(self, seed: bool = True) -> None:
         # {(tenant_id, fingerprint_key): SchemaTemplate}
         self._store: dict[tuple[str, str], SchemaTemplate] = {}
+        # {(tenant_id, fingerprint_key)} this tenant has quarantined (drift signal).
+        self._quarantined: set[tuple[str, str]] = set()
         if seed:
             for tpl in SEED_TEMPLATES:
                 self._store[("*", tpl.fingerprint_key)] = tpl
@@ -72,19 +74,26 @@ class TemplateStore:
         return tpl
 
     async def find_in_theme(self, tenant_id: str, theme: str) -> list[SchemaTemplate]:
-        """All templates filed under a theme (tenant-specific + global)."""
+        """All templates under a theme (tenant + global), minus quarantined ones."""
         out: list[SchemaTemplate] = []
-        for (tid, _key), tpl in self._store.items():
-            if tpl.theme == theme and tid in (tenant_id, "*"):
+        for (tid, key), tpl in self._store.items():
+            if tpl.theme == theme and tid in (tenant_id, "*") and (tenant_id, key) not in self._quarantined:
                 out.append(tpl)
         return out
 
+    async def quarantine(self, tenant_id: str, fingerprint_key: str, reason: str) -> None:
+        """Shadow a fingerprint for this tenant so its next same-layout doc re-learns."""
+        self._quarantined.add((tenant_id, fingerprint_key))
+        logger.info("template.quarantined", fingerprint=fingerprint_key,
+                    tenant_id=tenant_id, reason=reason)
+
     async def save(self, tenant_id: str, template: SchemaTemplate) -> None:
-        """Store/overwrite a template for a tenant."""
+        """Store/overwrite a template for a tenant. A fresh save lifts any quarantine."""
         existing = self._store.get((tenant_id, template.fingerprint_key))
         if existing:
             template.version = existing.version + 1
         self._store[(tenant_id, template.fingerprint_key)] = template
+        self._quarantined.discard((tenant_id, template.fingerprint_key))
         logger.info(
             "template_store.saved",
             fingerprint=template.fingerprint_key,

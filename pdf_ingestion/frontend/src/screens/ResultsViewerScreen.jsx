@@ -543,10 +543,10 @@ function FieldRow({ name, displayName, field, showTechnical, isAccountField, onC
         )}
         <button
           onClick={() => onCorrect(name, field?.value)}
-          style={{ ...styles.editBtn, opacity: hovered ? 1 : 0 }}
-          title="Submit correction"
+          style={styles.editBtn}
+          title="Submit a correction for this field"
         >
-          Edit
+          ✎ Correct
         </button>
       </div>
     </>
