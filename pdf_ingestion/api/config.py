@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # Services
     paddleocr_endpoint: str = "http://paddleocr:8080"
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/pdf_ingestion"
+    # Alembic runs DDL (incl. SECURITY DEFINER functions that must bypass RLS) as a
+    # superuser. The runtime database_url may point at the non-superuser pdf_app
+    # role; migrations use this URL instead. Defaults to the same superuser as dev.
+    migration_database_url: str = (
+        "postgresql+asyncpg://postgres:postgres@localhost:5432/pdf_ingestion"
+    )
 
     # Extraction
     digital_page_threshold: float = 0.80
@@ -46,6 +52,9 @@ class Settings(BaseSettings):
     # Admin Dashboard - Token cost rates (per 1k tokens)
     token_cost_per_1k_input: float = 0.003
     token_cost_per_1k_output: float = 0.015
+
+    # Durable job queue
+    queue_worker_count: int = 2
 
     # Admin Dashboard - Alert engine
     alert_evaluation_interval_seconds: int = 60

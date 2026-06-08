@@ -16,9 +16,11 @@ from db.models import Base
 # Alembic Config object
 config = context.config
 
-# Set sqlalchemy.url from application settings
+# Set sqlalchemy.url from application settings. Use the migration URL (a
+# superuser) so DDL like SECURITY DEFINER functions can bypass RLS as intended;
+# the runtime database_url may point at the non-superuser pdf_app role.
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", settings.migration_database_url)
 
 # Interpret the config file for Python logging
 if config.config_file_name is not None:
