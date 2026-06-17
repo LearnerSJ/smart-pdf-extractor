@@ -89,6 +89,8 @@ async def submit_correction(
     now = datetime.now(timezone.utc)
     trace_id = getattr(request.state, "trace_id", "unknown")
 
+    from sqlalchemy.exc import IntegrityError
+
     from db.feedback_repo import FeedbackRepo
 
     try:
@@ -102,11 +104,14 @@ async def submit_correction(
             notes=payload.notes,
             source="correction_api",
         )
-    except Exception as e:  # FK violation = job not visible to this tenant
+    except ValueError as e:  # malformed job_id (uuid.UUID() failed)
+        raise HTTPException(status_code=400, detail="Invalid job_id") from e
+    except IntegrityError as e:  # FK violation = job not visible to this tenant
         logger.warning("feedback.persist_failed", job_id=job_id, error=str(e))
         raise HTTPException(
             status_code=404, detail="Job not found for this tenant"
         ) from e
+    # Any other error (DB outage, RLS misconfig) propagates as 500 — not masked.
 
     logger.info(
         "feedback.submitted",

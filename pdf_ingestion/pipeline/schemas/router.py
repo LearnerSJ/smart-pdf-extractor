@@ -432,10 +432,14 @@ async def route_and_extract_async(
                 return f"template:{tmpl.fingerprint_key}", tmpl_result
 
         # No template hit (none learned, or this tenant quarantined it after a
-        # correction). Escalate to VLM discovery + re-learn so the layout is
-        # re-learned even on the known-schema path — this is what closes the
-        # feedback loop for docs that misclassify as a built-in schema.
-        if theme and tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
+        # correction). Escalate to VLM discovery + re-learn ONLY when the built-in
+        # extractor produced essentially nothing — i.e. the doc is genuinely
+        # mis-served by this schema (e.g. GIRO classified as bank_statement, or a
+        # template that was quarantined after a correction). A built-in result that
+        # got most fields but abstained on a few is NOT worth a VLM discovery, so
+        # this keeps the expensive path off the common partial-extraction case.
+        builtin_empty = not result.get("fields")
+        if builtin_empty and theme and tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
             signature = compute_layout_signature(doc, theme)
             async with learn_lock.guard(tenant_id, signature):
                 hit = await _try_theme_templates(doc, theme, template_store, tenant_id)
