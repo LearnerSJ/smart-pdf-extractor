@@ -15,17 +15,10 @@ import uuid
 import structlog
 from sqlalchemy import text
 
+from db.context import set_tenant
 from db.session import async_session_factory
 
 logger = structlog.get_logger()
-
-
-async def _set_tenant(session, tenant_id: str) -> None:
-    """Bind the tenant for this transaction so RLS policies apply."""
-    await session.execute(
-        text("SELECT set_config('app.current_tenant', :tid, true)"),
-        {"tid": tenant_id},
-    )
 
 
 class JobRepo:
@@ -33,7 +26,7 @@ class JobRepo:
 
     async def ensure_tenant(self, tenant_id: str, name: str, api_key_hash: str, vlm_enabled: bool) -> None:
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     """
@@ -49,7 +42,7 @@ class JobRepo:
     async def get_tenant(self, tenant_id: str) -> dict | None:
         """Load a tenant row (for workers reconstructing a TenantContext)."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             row = (
                 await s.execute(
                     text("SELECT id, name, api_key_hash, vlm_enabled FROM tenants WHERE id=:id"),
@@ -63,7 +56,7 @@ class JobRepo:
         doc_hash: str, schema_type: str | None, status: str = "processing",
     ) -> None:
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     """
@@ -80,7 +73,7 @@ class JobRepo:
 
     async def set_status(self, job_id: str, tenant_id: str, status: str) -> None:
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     "UPDATE jobs SET status = :st, completed_at = NOW() "
@@ -92,7 +85,7 @@ class JobRepo:
 
     async def save_result(self, job_id: str, tenant_id: str, output: dict) -> None:
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     """
@@ -131,7 +124,7 @@ class JobRepo:
             )
             total = flagged = 0
             for tid in tenant_ids:
-                await _set_tenant(s, tid)
+                await set_tenant(s, tid)
                 row = (await s.execute(per_tenant, {"tid": tid, "w": window_minutes})).first()
                 if row:
                     total += int(row[0] or 0)
@@ -141,7 +134,7 @@ class JobRepo:
     async def get_result_schema_type(self, job_id: str, tenant_id: str) -> str | None:
         """The schema_type recorded in a job's latest result (e.g. 'template:...')."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             row = (
                 await s.execute(
                     text(
@@ -176,7 +169,7 @@ class JobRepo:
             """
         )
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             rows = (await s.execute(sql, {"tid": tenant_id, "lim": limit})).mappings().all()
         out: list[dict] = []
         for r in rows:
@@ -198,7 +191,7 @@ class JobRepo:
     async def acknowledge_review(self, job_id: str, tenant_id: str) -> bool:
         """Clear the review flag once a human has handled a job. Returns True if updated."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             res = await s.execute(
                 text(
                     "UPDATE jobs SET needs_review = false "
@@ -223,7 +216,7 @@ class JobRepo:
                 r[0] for r in (await s.execute(text("SELECT id FROM tenants"))).all()
             ]
             for tid in tenant_ids:
-                await _set_tenant(s, tid)
+                await set_tenant(s, tid)
                 jrows = (await s.execute(
                     text("SELECT id, tenant_id, trace_id, filename, doc_hash, schema_type, "
                          "status, created_at, completed_at FROM jobs")

@@ -15,7 +15,7 @@ import json
 import structlog
 from sqlalchemy import text
 
-from db.job_repo import _set_tenant
+from db.context import set_tenant
 from db.session import async_session_factory
 from pipeline.schemas.template_extractor import SchemaTemplate
 from pipeline.schemas.template_store import SEED_TEMPLATES
@@ -37,7 +37,7 @@ class PostgresTemplateStore:
             """
         )
         async with async_session_factory() as session:
-            await _set_tenant(session, tenant_id)
+            await set_tenant(session, tenant_id)
             row = (await session.execute(sql, {"fk": fingerprint_key, "tid": tenant_id})).first()
         if not row:
             return None
@@ -57,14 +57,14 @@ class PostgresTemplateStore:
             """
         )
         async with async_session_factory() as session:
-            await _set_tenant(session, tenant_id)
+            await set_tenant(session, tenant_id)
             rows = (await session.execute(sql, {"theme": theme, "tid": tenant_id})).all()
         return [SchemaTemplate.from_dict(_as_dict(r[0])) for r in rows]
 
     async def quarantine(self, tenant_id: str, fingerprint_key: str, reason: str) -> None:
         """Shadow a fingerprint for this tenant so its next same-layout doc re-learns."""
         async with async_session_factory() as session:
-            await _set_tenant(session, tenant_id)
+            await set_tenant(session, tenant_id)
             await session.execute(
                 text(
                     """
@@ -83,7 +83,7 @@ class PostgresTemplateStore:
     async def save(self, tenant_id: str, template: SchemaTemplate) -> None:
         """Upsert a template for a tenant, bumping version on overwrite."""
         async with async_session_factory() as session:
-            await _set_tenant(session, tenant_id)
+            await set_tenant(session, tenant_id)
             existing = (
                 await session.execute(
                     text(

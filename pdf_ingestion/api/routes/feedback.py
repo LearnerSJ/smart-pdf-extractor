@@ -7,6 +7,7 @@ Tenant-scoped: only the authenticated tenant can submit/read its own feedback.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 import structlog
@@ -87,7 +88,7 @@ async def submit_correction(
         APIResponse with feedback confirmation.
     """
     now = datetime.now(timezone.utc)
-    trace_id = getattr(request.state, "trace_id", "unknown")
+    trace_id = getattr(request.state, "trace_id", None) or str(uuid.uuid4())
 
     from sqlalchemy.exc import IntegrityError
 
@@ -168,14 +169,16 @@ async def _quarantine_if_template(
 
 @router.get("/v1/feedback")
 async def list_feedback(
+    request: Request,
     tenant: TenantContext = Depends(resolve_tenant),
 ) -> APIResponse[list[FeedbackItem]]:
     """List corrections submitted by the authenticated tenant, newest first."""
     from db.feedback_repo import FeedbackRepo
 
+    trace_id = getattr(request.state, "trace_id", None) or str(uuid.uuid4())
     rows = await FeedbackRepo().list_for_tenant(tenant.id)
     now = datetime.now(timezone.utc)
     return APIResponse[list[FeedbackItem]](
         data=[FeedbackItem(**r) for r in rows],
-        meta=ResponseMeta(request_id="", timestamp=now.isoformat()),
+        meta=ResponseMeta(request_id=trace_id, timestamp=now.isoformat()),
     )

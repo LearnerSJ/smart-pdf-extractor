@@ -17,7 +17,7 @@ import uuid
 import structlog
 from sqlalchemy import text
 
-from db.job_repo import _set_tenant
+from db.context import set_tenant
 from db.session import async_session_factory
 
 logger = structlog.get_logger()
@@ -47,7 +47,7 @@ class JobQueue:
     ) -> None:
         """Persist the payload and mark the job queued (job row already created)."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     """
@@ -89,7 +89,7 @@ class JobQueue:
             job_id, tenant_id, attempts = row[0], row[1], row[2]
 
             # Load the payload under the claimed job's tenant (RLS-bound).
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             prow = (
                 await s.execute(
                     text(
@@ -113,7 +113,7 @@ class JobQueue:
     async def complete(self, job_id: str, tenant_id: str, *, needs_review: bool) -> None:
         """Mark a job complete, set the review flag, and drop the payload."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     "UPDATE jobs SET status='complete', completed_at=NOW(), "
@@ -130,7 +130,7 @@ class JobQueue:
     async def retry_later(self, job_id: str, tenant_id: str, error: str, delay_seconds: int) -> None:
         """Requeue a job after a transient failure, with a backoff delay."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     "UPDATE jobs SET status='queued', "
@@ -145,7 +145,7 @@ class JobQueue:
     async def fail(self, job_id: str, tenant_id: str, error: str) -> None:
         """Mark a job permanently failed and drop the payload."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             await s.execute(
                 text(
                     "UPDATE jobs SET status='failed', completed_at=NOW(), "

@@ -13,7 +13,7 @@ import uuid
 import structlog
 from sqlalchemy import text
 
-from db.job_repo import _set_tenant
+from db.context import set_tenant
 from db.session import async_session_factory
 
 logger = structlog.get_logger()
@@ -36,7 +36,7 @@ class FeedbackRepo:
     ) -> int:
         """Insert a correction; returns the new feedback id."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             row = (
                 await s.execute(
                     text(
@@ -65,7 +65,7 @@ class FeedbackRepo:
     async def list_for_tenant(self, tenant_id: str, limit: int = 500) -> list[dict]:
         """Return corrections for a tenant, newest first, shaped for the UI."""
         async with async_session_factory() as s:
-            await _set_tenant(s, tenant_id)
+            await set_tenant(s, tenant_id)
             rows = (
                 await s.execute(
                     text(
