@@ -4,6 +4,7 @@ import { NavLink } from "react-router-dom";
 const NAV_ITEMS = [
   { label: "Submit Job",   path: "/submit" },
   { label: "Job Queue",    path: "/queue" },
+  { label: "Results",      path: "/results" },
   { label: "Feedback",     path: "/feedback" },
   { label: "Integration",  path: "/integration" },
   { label: "Delivery",     path: "/settings/delivery" },
