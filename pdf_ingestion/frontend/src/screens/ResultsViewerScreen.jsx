@@ -32,14 +32,14 @@ export default function ResultsViewerScreen() {
   const navigate = useNavigate();
   const { data: result, loading, error } = useApi(`/v1/results/${jobId}`);
   const { data: jobData } = useApi(`/v1/jobs/${jobId}`);
-  const [activeTab, setActiveTab] = useState("fields");
+  const [activeTab, setActiveTab] = useState("overview");
   const [correction, setCorrection] = useState(null);
-  const [showPdfViewer, setShowPdfViewer] = useState(false);
   const [pdfHighlights, setPdfHighlights] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
   const [showAllTables, setShowAllTables] = useState(false);
   const [pendingSchemaId, setPendingSchemaId] = useState(null);
+  const [overviewExpanded, setOverviewExpanded] = useState(false);
 
   // Get all jobs for prev/next navigation
   const allJobs = JSON.parse(sessionStorage.getItem("pdf_jobs") || "[]");
@@ -55,18 +55,15 @@ export default function ResultsViewerScreen() {
     }
   }, [result]);
 
+  // Remember the last result viewed so the "Results" LHS section can land here.
+  useEffect(() => {
+    if (jobId) sessionStorage.setItem("last_result_job", jobId);
+  }, [jobId]);
+
   function handlePageChange(page) {
-    const newPage = clampPage(page, totalPages);
-    setCurrentPage(newPage);
-    // Auto-switch tabs based on what's on the new page
-    const tablesOnPage = tables.filter(
-      t => Array.isArray(t.page_range) && t.page_range.length > 0 && t.page_range.includes(newPage)
-    );
-    if (tablesOnPage.length > 0) {
-      setActiveTab("tables");
-    }
-    // Note: we don't auto-switch back to "fields" when there are no tables —
-    // that would be disruptive if the user is intentionally on another tab.
+    // Just track the page — do NOT force the active tab. (Auto-switching to
+    // "tables" on every page change made the other tabs feel unavailable.)
+    setCurrentPage(clampPage(page, totalPages));
   }
 
   function handleTotalPages(n) {
@@ -172,18 +169,20 @@ export default function ResultsViewerScreen() {
     return all;
   }, []);
 
-  const tablesOnCurrentPage = tables.filter(
-    t => !Array.isArray(t.page_range) || t.page_range.length === 0 || t.page_range.includes(currentPage)
-  ).length;
+  // Highlights for the Overview PDF: every extracted field that carries a
+  // provenance bbox, drawn on its own page (PdfViewer filters by current page).
+  const fieldHighlights = Object.entries(fields)
+    .filter(([, f]) => f && typeof f === "object" && f.provenance?.bbox)
+    .map(([name, f]) => ({ fieldName: name, page: f.provenance.page ?? 1, ...f.provenance.bbox }));
 
   const tabs = [
+    { id: "overview", label: "Overview" },
     { id: "fields", label: "Fields" },
-    { id: "tables", label: showPdfViewer && tablesOnCurrentPage < tables.length
-        ? `Tables (${tablesOnCurrentPage}/${tables.length} on p.${currentPage})`
-        : `Tables (${tables.length})` },
+    { id: "tables", label: `Tables (${tables.length})` },
     { id: "abstentions", label: `Abstentions (${abstentions.length})` },
     { id: "validation", label: "Validation", badge: getValidationBadgeCount(valFailures) },
     { id: "chat", label: "Chat" },
+    { id: "source", label: "Source PDF" },
   ];
 
   return (
@@ -252,7 +251,7 @@ export default function ResultsViewerScreen() {
           </div>
         </div>
 
-        {/* Export & View Source buttons */}
+        {/* Export buttons (source PDF is now a tab below) */}
         <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', alignItems: 'center' }}>
           <button onClick={() => exportToCSV(result, jobData?.filename?.replace('.pdf', '') || jobId)} style={styles.exportBtn}>
             ↓ Export CSV
@@ -260,86 +259,123 @@ export default function ResultsViewerScreen() {
           <button onClick={() => exportToExcel(result, jobData?.filename?.replace('.pdf', '') || jobId)} style={styles.exportBtn}>
             ↓ Export Excel
           </button>
-          <button
-            onClick={() => setShowPdfViewer(!showPdfViewer)}
-            style={{ ...styles.exportBtn, marginLeft: 'auto', backgroundColor: showPdfViewer ? 'var(--color-info)' : 'var(--color-surface)', color: showPdfViewer ? '#fff' : 'var(--color-text-primary)' }}
-          >
-            {showPdfViewer ? '✕ Close PDF' : '⊞ View Source PDF'}
-          </button>
         </div>
       </div>
 
-      {/* ── Split pane — fixed height, each side scrolls independently ── */}
-      <div style={{ display: 'flex', gap: 'var(--space-4)', height: '65vh', minHeight: 480 }}>
-        {showPdfViewer && (
-          <div style={{ flex: '0 0 50%', maxWidth: '50%', height: '100%', border: '1px solid var(--color-border-light)', borderRadius: 'var(--border-radius)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <PdfViewer
-              jobId={jobId}
-              highlights={pdfHighlights}
-              currentPage={currentPage}
-              onPageChange={handlePageChange}
-              onTotalPages={handleTotalPages}
-            />
-          </div>
+      {/* ── Results body — single column; Source PDF is its own tab ── */}
+      <div>
+        {/* Schema Approval Banner — shown when a pending schema exists or LLM escalated */}
+        {(pendingSchemaId != null || output?.llm_escalated) && (
+          <SchemaApprovalBanner
+            jobId={jobId}
+            pendingSchemaId={pendingSchemaId || output?.pending_schema_id}
+            schemaLabel={output?.schema_type}
+            institution={output?.fields?.institution?.value}
+            fieldCount={Object.keys(output?.fields || {}).length}
+            tableCount={tables.length}
+            onApproved={() => setPendingSchemaId(null)}
+            onDiscarded={() => setPendingSchemaId(null)}
+          />
         )}
-        <div style={{ flex: 1, minWidth: 0, height: '100%', overflow: 'auto' }}>
-          {/* Schema Approval Banner — shown when a pending schema exists or LLM escalated */}
-          {(pendingSchemaId != null || output?.llm_escalated) && (
-            <SchemaApprovalBanner
-              jobId={jobId}
-              pendingSchemaId={pendingSchemaId || output?.pending_schema_id}
-              schemaLabel={output?.schema_type}
-              institution={output?.fields?.institution?.value}
-              fieldCount={Object.keys(output?.fields || {}).length}
-              tableCount={tables.length}
-              onApproved={() => setPendingSchemaId(null)}
-              onDiscarded={() => setPendingSchemaId(null)}
-            />
-          )}
 
-          {/* Tabs */}
-          <div style={styles.tabBar}>
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
+        {/* Tabs */}
+        <div style={styles.tabBar}>
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                ...styles.tab,
+                ...(activeTab === tab.id ? styles.tabActive : {}),
+              }}
+            >
+              {tab.label}
+              {tab.badge > 0 && <span style={styles.tabBadge}>{tab.badge}</span>}
+            </button>
+          ))}
+        </div>
+
+        {/* Tab content */}
+        <div style={styles.tabContent}>
+          {activeTab === "overview" && (
+            <div style={overviewExpanded ? styles.overviewOverlay : undefined}>
+              <div style={styles.overviewToolbar}>
+                <span style={styles.overviewHint}>
+                  Source (page {currentPage}) with field highlights · extracted tables
+                </span>
+                <button
+                  onClick={() => setOverviewExpanded((v) => !v)}
+                  style={styles.expandBtn}
+                  title={overviewExpanded ? "Collapse" : "Expand to full screen"}
+                >
+                  {overviewExpanded ? "⤡ Collapse" : "⤢ Expand"}
+                </button>
+              </div>
+              <div
                 style={{
-                  ...styles.tab,
-                  ...(activeTab === tab.id ? styles.tabActive : {}),
+                  ...styles.overviewSplit,
+                  ...(overviewExpanded ? { flex: 1, minHeight: 0 } : { height: "72vh" }),
                 }}
               >
-                {tab.label}
-                {tab.badge > 0 && <span style={styles.tabBadge}>{tab.badge}</span>}
-              </button>
-            ))}
-          </div>
-
-          {/* Tab content */}
-          <div style={styles.tabContent}>
-            {activeTab === "fields" && (
-              <FieldsPanel
-                fields={fields}
-                onCorrect={(name, val) => setCorrection({ name, val })}
-                onViewSource={(name, field) => {
-                  if (field?.provenance?.bbox) {
-                    setPdfHighlights([{ fieldName: name, ...field.provenance.bbox }]);
-                    setCurrentPage(field.provenance.page ?? 1);
-                    setShowPdfViewer(true);
-                  }
-                }}
+                <div style={styles.overviewPane}>
+                  <PdfViewer
+                    jobId={jobId}
+                    highlights={fieldHighlights}
+                    currentPage={currentPage}
+                    onPageChange={handlePageChange}
+                    onTotalPages={handleTotalPages}
+                  />
+                </div>
+                <div style={{ ...styles.overviewPane, overflow: "auto" }}>
+                  {tables.length > 0 ? (
+                    <ResultsTablesPanel
+                      tables={tables}
+                      currentPage={currentPage}
+                      onTableClick={handleTableClick}
+                      showAllTables={true}
+                      onToggleShowAll={() => {}}
+                    />
+                  ) : (
+                    <div style={styles.emptyPanel}>No tables extracted.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+          {activeTab === "fields" && (
+            <FieldsPanel
+              fields={fields}
+              onCorrect={(name, val) => setCorrection({ name, val })}
+              onViewSource={(name, field) => {
+                if (field?.provenance?.bbox) {
+                  setPdfHighlights([{ fieldName: name, ...field.provenance.bbox }]);
+                  setCurrentPage(field.provenance.page ?? 1);
+                  setActiveTab("source");
+                }
+              }}
+            />
+          )}
+          {activeTab === "tables" && <ResultsTablesPanel
+            tables={tables}
+            currentPage={currentPage}
+            onTableClick={handleTableClick}
+            showAllTables={showAllTables}
+            onToggleShowAll={() => setShowAllTables((v) => !v)}
+          />}
+          {activeTab === "abstentions" && <ResultsAbstentionsPanel abstentions={abstentions} />}
+          {activeTab === "validation" && <ResultsValidationPanel failures={valFailures} />}
+          {activeTab === "chat" && <ChatPanel jobId={jobId} filename={jobData?.filename} onPendingSchema={(id) => setPendingSchemaId(id)} />}
+          {activeTab === "source" && (
+            <div style={styles.pdfTabPane}>
+              <PdfViewer
+                jobId={jobId}
+                highlights={pdfHighlights}
+                currentPage={currentPage}
+                onPageChange={handlePageChange}
+                onTotalPages={handleTotalPages}
               />
-            )}
-            {activeTab === "tables" && <ResultsTablesPanel
-              tables={tables}
-              currentPage={currentPage}
-              onTableClick={handleTableClick}
-              showAllTables={showAllTables}
-              onToggleShowAll={() => setShowAllTables((v) => !v)}
-            />}
-            {activeTab === "abstentions" && <ResultsAbstentionsPanel abstentions={abstentions} />}
-            {activeTab === "validation" && <ResultsValidationPanel failures={valFailures} />}
-            {activeTab === "chat" && <ChatPanel jobId={jobId} filename={jobData?.filename} onPendingSchema={(id) => setPendingSchemaId(id)} />}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -581,7 +617,16 @@ const styles = {
   summaryItem: { display: "flex", alignItems: "center", gap: "var(--space-2)" },
   summaryLabel: { fontSize: "var(--text-xs)", color: "var(--color-text-muted)", textTransform: "uppercase" },
   summaryValue: { fontSize: "var(--text-md)", fontWeight: 600, color: "var(--color-text-primary)" },
-  tabBar: { display: "flex", gap: 0, borderBottom: "1px solid var(--color-border-light)", marginBottom: "var(--space-4)" },
+  tabBar: { display: "flex", flexWrap: "wrap", gap: 0, borderBottom: "1px solid var(--color-border-light)", marginBottom: "var(--space-4)" },
+  pdfTabPane: { height: "72vh", minHeight: 480, border: "1px solid var(--color-border-light)", borderRadius: "var(--border-radius)", display: "flex", flexDirection: "column", overflow: "hidden" },
+  // Overview tab — PDF (left) + extracted tables (right).
+  overviewToolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" },
+  overviewHint: { fontSize: "var(--text-xs)", color: "var(--color-text-muted)" },
+  overviewSplit: { display: "flex", gap: "var(--space-4)", minHeight: 480 },
+  overviewPane: { flex: 1, minWidth: 0, height: "100%", border: "1px solid var(--color-border-light)", borderRadius: "var(--border-radius)", display: "flex", flexDirection: "column", overflow: "hidden" },
+  // Expanded: cover the main content area full-screen but keep the LHS sidebar visible.
+  overviewOverlay: { position: "fixed", top: 0, right: 0, bottom: 0, left: "var(--sidebar-width)", backgroundColor: "var(--color-bg, #f9fafb)", zIndex: 200, padding: "var(--space-4)", display: "flex", flexDirection: "column" },
+  expandBtn: { padding: "4px 10px", fontSize: "var(--text-sm)", backgroundColor: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--border-radius-sm)", cursor: "pointer", fontWeight: 500, whiteSpace: "nowrap" },
   tab: { padding: "var(--space-2) var(--space-4)", border: "none", borderBottom: "2px solid transparent", background: "none", cursor: "pointer", fontSize: "var(--text-md)", color: "var(--color-text-secondary)", display: "flex", alignItems: "center", gap: "var(--space-1)" },
   tabActive: { borderBottomColor: "var(--color-info)", color: "var(--color-info)", fontWeight: 600 },
   tabBadge: { backgroundColor: "var(--color-error)", color: "#fff", fontSize: "var(--text-xs)", padding: "1px 5px", borderRadius: "8px", fontWeight: 600 },

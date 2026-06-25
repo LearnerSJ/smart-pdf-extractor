@@ -34,7 +34,7 @@ from api.models.response import (
 )
 from api.models.tenant import TenantContext
 from pipeline.assembler import assemble
-from pipeline.classifier import classify_page
+from pipeline.classifier import classify_page, is_garbled_text
 from pipeline.extractors.camelot_extractor import extract_tables_camelot
 from pipeline.extractors.digital import extract_digital_page
 from pipeline.ingestion import ingest, IngestionError
@@ -123,11 +123,33 @@ def _classify_and_extract_digital(content: bytes, progress: Any) -> tuple:
 
         for page_num, page in enumerate(pdf.pages, start=1):
             classification = classify_page(page)
+            page_output = None
+
+            if classification == "DIGITAL":
+                page_output = extract_digital_page(page, page_num)
+                # Guard: a "digital" page whose text layer is gibberish (broken
+                # font encoding, or content rotated so the layer reads as
+                # mojibake) must NOT be trusted. Route it to OCR instead, where
+                # orientation is corrected and the glyphs are read from pixels.
+                # Use extract_text() (real word boundaries) — the token stream is
+                # character-level, which would defeat the word-likeness check.
+                try:
+                    page_text = page.extract_text() or ""
+                except Exception:
+                    page_text = ""
+                if is_garbled_text(page_text):
+                    logger.warning(
+                        "page.reclassified_garbled",
+                        page_number=page_num,
+                        reason="digital text layer not word-like; routing to OCR",
+                    )
+                    classification = "SCANNED"
+                    page_output = None
+
             page_data.append((page_num, classification))
 
             if classification == "DIGITAL":
                 pages_digital += 1
-                page_output = extract_digital_page(page, page_num)
 
                 # Only triangulate tables that aren't already clean — and only
                 # pay for camelot (which re-parses the page) when needed.
@@ -1591,10 +1613,40 @@ def _render_page_image(page: Any) -> bytes:
 
         buf = io.BytesIO()
         im.save(buf, format="PNG")
-        return buf.getvalue()
+        return _correct_orientation(buf.getvalue())
     except Exception:
         # Return minimal placeholder if rendering fails
         return b""
+
+
+def _correct_orientation(png_bytes: bytes) -> bytes:
+    """Rotate a rendered page upright using Tesseract OSD, before OCR.
+
+    Scans/exports are sometimes 90/180/270° off; OCR (and the VLM) can't read
+    rotated text. OSD detects the rotation and we rotate to upright. Best-effort:
+    if OSD/Tesseract/PIL is unavailable or unsure, return the image unchanged.
+    """
+    try:
+        import io
+        import re
+
+        import pytesseract
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(png_bytes))
+        osd = pytesseract.image_to_osd(im)
+        rotate = int(re.search(r"Rotate:\s*(\d+)", osd).group(1))
+        if rotate % 360 == 0:
+            return png_bytes
+        # OSD "Rotate: N" = degrees clockwise needed to make it upright;
+        # PIL rotate() is counter-clockwise, so negate.
+        rotated = im.rotate(-rotate, expand=True)
+        out = io.BytesIO()
+        rotated.save(out, format="PNG")
+        logger.info("page.orientation_corrected", rotate_degrees=rotate)
+        return out.getvalue()
+    except Exception:
+        return png_bytes
 
 
 def _increment_vlm_progress(progress) -> None:

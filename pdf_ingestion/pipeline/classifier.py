@@ -7,9 +7,40 @@ total page area. Threshold is 0.80.
 
 from __future__ import annotations
 
+import re
+
 import structlog
 
 logger = structlog.get_logger()
+
+# Common English + finance words. Any genuine statement page with a handful of
+# word-like tokens contains several of these; a broken/mis-rotated text layer
+# (mojibake) contains essentially none — a high-precision "is this real text?"
+# signal that needs no dictionary dependency.
+_COMMON_WORDS = frozenset({
+    "the", "and", "for", "of", "to", "in", "on", "date", "total", "amount",
+    "account", "statement", "balance", "report", "cash", "value", "portfolio",
+    "bank", "fund", "number", "period", "opening", "closing", "page", "name",
+    "payment", "transaction", "settlement", "currency", "interest", "fees",
+    "holdings", "positions", "dividend", "market", "net", "summary",
+})
+
+# Don't judge pages with too few word-like tokens — too little signal, and
+# forcing OCR there risks needless cost on sparse-but-valid pages.
+_MIN_TOKENS_TO_JUDGE = 8
+
+
+def is_garbled_text(text: str) -> bool:
+    """True if `text` has many word-like tokens but none are common words.
+
+    Catches a "digital" page whose embedded text layer is gibberish (broken font
+    encoding or content rotated so the layer reads as mojibake) — the caller
+    should route such a page to OCR rather than trust pdfplumber.
+    """
+    tokens = re.findall(r"[a-z]{3,}", (text or "").lower())
+    if len(tokens) < _MIN_TOKENS_TO_JUDGE:
+        return False
+    return not any(t in _COMMON_WORDS for t in tokens)
 
 # Classification threshold.
 # Coverage = glyph-bbox area / page area. Real digital text pages sit around

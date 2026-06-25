@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pipeline.classifier import classify_page, compute_native_text_coverage
+from pipeline.classifier import classify_page, compute_native_text_coverage, is_garbled_text
 
 
 class MockPage:
@@ -80,3 +80,22 @@ def test_coverage_zero_area_page():
     page = MockPage(width=0, height=100, chars=[{"x0": 0, "top": 0, "x1": 10, "bottom": 10, "text": "x"}])
     coverage = compute_native_text_coverage(page)
     assert coverage == 0.0
+
+
+def test_garbled_detects_real_text():
+    """A real statement page (has common words) is NOT garbled."""
+    text = "GIRO Payment Account Currency SGD Amount Total Item Bank Code Reference Status"
+    assert is_garbled_text(text) is False
+
+
+def test_garbled_detects_mojibake():
+    """A broken/rotated text layer (no common words) IS garbled → route to OCR."""
+    text = ("rs9 lore orr tt slsos Psurl rrorr usg ror anle ajJehl "
+            "HSVf Orlolruod cNrso INrdO sMoulno Jaqlo")
+    assert is_garbled_text(text) is True
+
+
+def test_garbled_skips_short_text():
+    """Too few tokens to judge — don't force OCR (avoid false positives)."""
+    assert is_garbled_text("abc def") is False
+    assert is_garbled_text("") is False
