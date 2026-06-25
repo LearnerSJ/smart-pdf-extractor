@@ -351,28 +351,11 @@ async def route_and_extract_async(
 
         # ── Tier 2: VLM discovery, then learn + save a template for next time ──
         if tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
-            # Learn-lock: serialise identical layouts so a batch of N never-seen
-            # docs triggers ONE VLM discovery, not N. Waiters double-check the
-            # store on acquire and reuse the freshly-learned template (zero VLM).
-            signature = compute_layout_signature(doc, theme)
-            async with learn_lock.guard(tenant_id, signature):
-                if theme:
-                    hit = await _try_theme_templates(doc, theme, template_store, tenant_id)
-                    if hit is not None:
-                        tmpl, result = hit
-                        logger.info(
-                            "template.hit",
-                            fingerprint=tmpl.fingerprint_key,
-                            theme=theme,
-                            source=tmpl.source,
-                            via="learn_lock_double_check",
-                            trace_id=trace_id,
-                        )
-                        return f"template:{tmpl.fingerprint_key}", result
-                return await _discover_and_learn(
-                    doc, theme, tenant, vlm_client, redactor, schema_cache,
-                    token_budget, trace_id, template_store, tenant_id,
-                )
+            return await _locked_discover(
+                doc, theme, tenant, vlm_client, redactor, schema_cache,
+                token_budget, trace_id, template_store, tenant_id, learn_lock,
+                via_label="learn_lock_double_check",
+            )
 
         # VLM not available — fall back to standard abstention
         abstention = Abstention(
@@ -432,34 +415,71 @@ async def route_and_extract_async(
                 return f"template:{tmpl.fingerprint_key}", tmpl_result
 
         # No template hit (none learned, or this tenant quarantined it after a
-        # correction). Escalate to VLM discovery + re-learn so the layout is
-        # re-learned even on the known-schema path — this is what closes the
-        # feedback loop for docs that misclassify as a built-in schema.
-        if theme and tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
-            signature = compute_layout_signature(doc, theme)
-            async with learn_lock.guard(tenant_id, signature):
-                hit = await _try_theme_templates(doc, theme, template_store, tenant_id)
-                if hit is not None:  # another worker just re-learned it
-                    tmpl, tmpl_result = hit
-                    logger.info(
-                        "template.hit", fingerprint=tmpl.fingerprint_key, theme=theme,
-                        source=tmpl.source, via="builtin_fallback_double_check",
-                        trace_id=trace_id,
-                    )
-                    return f"template:{tmpl.fingerprint_key}", tmpl_result
-                discovered_type, discovered_result = await _discover_and_learn(
-                    doc, theme, tenant, vlm_client, redactor, schema_cache,
-                    token_budget, trace_id, template_store, tenant_id,
-                )
-                # Prefer discovery only if it actually extracted something;
-                # otherwise keep the built-in result rather than degrade it.
-                if discovered_result.get("fields") or discovered_result.get("tables"):
-                    return discovered_type, discovered_result
+        # correction). Escalate to VLM discovery + re-learn ONLY when the built-in
+        # extractor produced essentially nothing — i.e. the doc is genuinely
+        # mis-served by this schema (e.g. GIRO classified as bank_statement, or a
+        # template that was quarantined after a correction). A built-in result that
+        # got most fields but abstained on a few is NOT worth a VLM discovery, so
+        # this keeps the expensive path off the common partial-extraction case.
+        builtin_empty = not result.get("fields")
+        if builtin_empty and theme and tenant and tenant.vlm_enabled and vlm_client and redactor and schema_cache and token_budget:
+            discovered_type, discovered_result = await _locked_discover(
+                doc, theme, tenant, vlm_client, redactor, schema_cache,
+                token_budget, trace_id, template_store, tenant_id, learn_lock,
+                via_label="builtin_fallback_double_check",
+            )
+            # Prefer discovery only if it actually extracted something; otherwise
+            # keep the built-in result rather than degrade it. (A double-check
+            # template hit always has fields/tables, so it is preferred too.)
+            if discovered_result.get("fields") or discovered_result.get("tables"):
+                return discovered_type, discovered_result
 
     return schema_type, result
 
 
 # ─── Private Helpers ──────────────────────────────────────────────────────────
+
+
+async def _locked_discover(
+    doc: AssembledDocument,
+    theme: str | None,
+    tenant: TenantContext,
+    vlm_client: VLMClientPort,
+    redactor: RedactorPort,
+    schema_cache: "SchemaCache",
+    token_budget: TokenBudget,
+    trace_id: str,
+    template_store: TemplateStore,
+    tenant_id: str,
+    learn_lock: LearnLock,
+    via_label: str,
+) -> tuple[str, dict]:
+    """Serialised VLM discovery + learn, shared by the unknown and known-schema paths.
+
+    Learn-lock serialises identical layouts so a batch of N never-seen docs
+    triggers ONE VLM discovery, not N. On acquiring the lock we double-check the
+    template store — another worker may have just learned (or re-learned) the
+    template — and reuse it with zero VLM. Otherwise we discover + synthesise.
+    """
+    signature = compute_layout_signature(doc, theme)
+    async with learn_lock.guard(tenant_id, signature):
+        if theme:
+            hit = await _try_theme_templates(doc, theme, template_store, tenant_id)
+            if hit is not None:
+                tmpl, tmpl_result = hit
+                logger.info(
+                    "template.hit",
+                    fingerprint=tmpl.fingerprint_key,
+                    theme=theme,
+                    source=tmpl.source,
+                    via=via_label,
+                    trace_id=trace_id,
+                )
+                return f"template:{tmpl.fingerprint_key}", tmpl_result
+        return await _discover_and_learn(
+            doc, theme, tenant, vlm_client, redactor, schema_cache,
+            token_budget, trace_id, template_store, tenant_id,
+        )
 
 
 async def _discover_and_learn(
