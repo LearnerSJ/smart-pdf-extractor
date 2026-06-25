@@ -72,7 +72,12 @@ export default function JobQueueScreen() {
               }
               return job;
             }
-            // Job not found (server restarted) — keep in list with stale status
+            if (res.status === 404) {
+              // Job is permanently gone (e.g. backend restarted, in-memory
+              // store cleared). Drop it so we stop polling a dead id forever.
+              return null;
+            }
+            // Other server error (5xx) — transient; keep and retry next tick.
             validIds.push(id);
             const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
             return {
@@ -94,6 +99,21 @@ export default function JobQueueScreen() {
           }
         })
       );
+
+      // Prune dropped (404) ids from storage so they aren't polled again.
+      if (validIds.length !== stored.length) {
+        sessionStorage.setItem("pdf_jobs", JSON.stringify(validIds));
+        const droppedSet = new Set(stored.filter((id) => !validIds.includes(id)));
+        if (droppedSet.size > 0) {
+          const jobFiles = JSON.parse(sessionStorage.getItem("pdf_job_files") || "{}");
+          for (const id of droppedSet) delete jobFiles[id];
+          sessionStorage.setItem("pdf_job_files", JSON.stringify(jobFiles));
+          const lastResult = sessionStorage.getItem("last_result_job");
+          if (lastResult && droppedSet.has(lastResult)) {
+            sessionStorage.removeItem("last_result_job");
+          }
+        }
+      }
 
       setJobs(results.filter(Boolean));
       setLoading(false);
