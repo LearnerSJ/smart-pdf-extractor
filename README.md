@@ -1,4 +1,4 @@
-# Smart PDF
+# MyDoc PDF
 
 A back-office document extraction service for financial reconciliation. Processes bank statements, custody statements, SWIFT confirmations, settlement reports, and any unknown document type via auto-schema discovery — extracting structured data from any PDF format (digital or scanned).
 
